@@ -1,6 +1,12 @@
 [package]
 name = "rustssi"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+libbpf-rs = "0.24"
+libc = "0.2"
+anyhow = "1"
+
+[build-dependencies]
+libbpf-cargo = "0.24"
