@@ -1,154 +1,67 @@
-//! Phase 1: prove the data plane.
+//! Phase 4: two-thread client.
 //!
-//! Loads the XDP redirector, tracks a server `(IPv4, port)` endpoint in the BPF
-//! config map, opens a copy-mode AF_XDP socket, wires its fd into the XSKMAP,
-//! attaches the program in generic (SKB) mode, and prints every frame the
-//! kernel redirects into UMEM. Matched traffic shows up here; unmatched traffic
-//! never does (it stays on the kernel path).
+//! A pinned data-plane thread (AF_XDP + smoltcp + IRC parsing) and a ratatui UI
+//! thread, joined only by two lock-free SPSC rings — decoded lines up, user
+//! commands down. No async runtime.
 
+mod irc;
+mod net;
+mod ui;
 mod xsk;
 
-use std::ffi::CString;
-use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
-use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
-use anyhow::{bail, Context, Result};
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags, Xdp, XdpFlags};
+use anyhow::{Context, Result};
+use rtrb::RingBuffer;
 
-mod skel {
-    include!(concat!(env!("OUT_DIR"), "/rustssi.skel.rs"));
-}
-use skel::*;
-
-const FRAME_SIZE: u32 = 4096;
-const FRAME_COUNT: u32 = 4096;
-const FILL_SIZE: u32 = 2048;
-const RX_SIZE: u32 = 2048;
-const QUEUE_ID: u32 = 0;
-
-static RUNNING: AtomicBool = AtomicBool::new(true);
-
-extern "C" fn on_signal(_: libc::c_int) {
-    RUNNING.store(false, Ordering::SeqCst);
-}
+const CHANNEL: &str = "#test";
+const RING_CAP: usize = 1024;
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let ifname = args.next().context("usage: rustssi <ifname> <server-ipv4> <port>")?;
-    let ip: Ipv4Addr = args
-        .next()
-        .context("missing server ipv4")?
-        .parse()
-        .context("bad server ipv4")?;
-    let port: u16 = args
-        .next()
-        .context("missing port")?
-        .parse()
-        .context("bad port")?;
+    let mut a = std::env::args().skip(1);
+    let usage = "usage: rustssi <ifname> <our-ipv4> <server-ipv4> <port> <server-mac> [nick] [channel]";
+    let ifname = a.next().context(usage)?;
+    let our_ip: Ipv4Addr = a.next().context(usage)?.parse().context("bad our-ipv4")?;
+    let server_ip: Ipv4Addr = a.next().context(usage)?.parse().context("bad server-ipv4")?;
+    let port: u16 = a.next().context(usage)?.parse().context("bad port")?;
+    let server_mac = net::parse_mac(&a.next().context(usage)?)?;
+    let nick = a.next().unwrap_or_else(|| "rustssi".to_string());
+    let channel = a.next().unwrap_or_else(|| CHANNEL.to_string());
 
-    // AF_XDP UMEM registration is charged against RLIMIT_MEMLOCK.
-    let inf = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &inf) } != 0 {
-        bail!("setrlimit(MEMLOCK): {}", std::io::Error::last_os_error());
-    }
-
-    let ifindex = {
-        let c = CString::new(ifname.as_str()).unwrap();
-        let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
-        if idx == 0 {
-            bail!("interface {ifname:?} not found");
-        }
-        idx
+    let cfg = net::NetConfig {
+        ifname,
+        our_ip,
+        server_ip,
+        port,
+        server_mac,
+        nick: nick.clone(),
+        channel: channel.clone(),
     };
 
-    // Load the BPF object (creates the maps and validates the program).
-    let mut open_obj = MaybeUninit::uninit();
-    let open = RustssiSkelBuilder::default()
-        .open(&mut open_obj)
-        .context("open skeleton")?;
-    let skel = open.load().context("load skeleton (verifier)")?;
+    // Two SPSC rings: net -> ui (display lines), ui -> net (commands).
+    let (net_to_ui_tx, net_to_ui_rx) = RingBuffer::<String>::new(RING_CAP);
+    let (ui_to_net_tx, ui_to_net_rx) = RingBuffer::<String>::new(RING_CAP);
 
-    // Track the server endpoint. Key layout is network byte order to match the
-    // packet bytes the BPF program reads.
-    let mut key = [0u8; 6];
-    key[0..4].copy_from_slice(&ip.octets());
-    key[4..6].copy_from_slice(&port.to_be_bytes());
-    skel.maps
-        .config_map
-        .update(&key, &[1u8], MapFlags::ANY)
-        .context("insert endpoint into config_map")?;
+    let running = Arc::new(AtomicBool::new(true));
 
-    // Open the AF_XDP socket and register its fd for this RX queue *before*
-    // attaching the program, so the first redirected packet has a target.
-    let mut sock = xsk::XskSocket::new(ifindex, QUEUE_ID, FRAME_SIZE, FRAME_COUNT, FILL_SIZE, RX_SIZE)
-        .context("create AF_XDP socket")?;
-    skel.maps
-        .xsks_map
-        .update(
-            &QUEUE_ID.to_ne_bytes(),
-            &(sock.fd() as u32).to_ne_bytes(),
-            MapFlags::ANY,
-        )
-        .context("insert socket fd into xsks_map")?;
+    let net_running = running.clone();
+    let net_thread = thread::Builder::new()
+        .name("dataplane".into())
+        .spawn(move || net::run(cfg, net_to_ui_tx, ui_to_net_rx, net_running))
+        .context("spawn data-plane thread")?;
 
-    // Attach in generic/SKB mode (veth has no native/zero-copy AF_XDP path).
-    let xdp = Xdp::new(skel.progs.xdp_redirect_irc.as_fd());
-    xdp.attach(ifindex as i32, XdpFlags::SKB_MODE)
-        .context("attach xdp program")?;
+    // UI runs on the main thread (ratatui prefers it).
+    let ui_res = ui::run(ui_to_net_tx, net_to_ui_rx, running.clone(), nick, channel);
+    running.store(false, Ordering::SeqCst);
 
-    unsafe {
-        libc::signal(libc::SIGINT, on_signal as *const () as usize);
-        libc::signal(libc::SIGTERM, on_signal as *const () as usize);
+    let net_res = net_thread.join().expect("data-plane thread panicked");
+
+    ui_res?;
+    if let Err(e) = net_res {
+        eprintln!("data-plane error: {e:#}");
     }
-
-    println!(
-        "rustssi phase1: iface={ifname} (ifindex={ifindex}) queue={QUEUE_ID} tracking {ip}:{port}"
-    );
-    println!("waiting for redirected frames (Ctrl-C to stop)...");
-
-    let mut total = 0usize;
-    while RUNNING.load(Ordering::SeqCst) {
-        let n = sock.poll_rx(std::time::Duration::from_millis(500), |frame| {
-            total += 1;
-            print_frame(total, frame);
-        })?;
-        let _ = n;
-    }
-
-    xdp.detach(ifindex as i32, XdpFlags::SKB_MODE)
-        .context("detach xdp program")?;
-    println!("\nstopped. {total} frame(s) redirected into UMEM.");
     Ok(())
-}
-
-fn print_frame(n: usize, frame: &[u8]) {
-    if frame.len() < 34 || u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
-        println!("#{n} non-IPv4 frame len={}", frame.len());
-        return;
-    }
-    let ihl = (frame[14] & 0x0f) as usize * 4;
-    let proto = frame[23];
-    let src = Ipv4Addr::new(frame[26], frame[27], frame[28], frame[29]);
-    let dst = Ipv4Addr::new(frame[30], frame[31], frame[32], frame[33]);
-    let l4 = 14 + ihl;
-    let (sp, dp) = if frame.len() >= l4 + 4 {
-        (
-            u16::from_be_bytes([frame[l4], frame[l4 + 1]]),
-            u16::from_be_bytes([frame[l4 + 2], frame[l4 + 3]]),
-        )
-    } else {
-        (0, 0)
-    };
-    let pname = match proto {
-        6 => "TCP",
-        17 => "UDP",
-        other => return println!("#{n} ip proto={other} {src} -> {dst} len={}", frame.len()),
-    };
-    println!("#{n} MATCH {pname} {src}:{sp} -> {dst}:{dp} len={}", frame.len());
 }

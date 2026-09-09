@@ -7,6 +7,14 @@ edition = "2021"
 libbpf-rs = "0.24"
 libc = "0.2"
 anyhow = "1"
+smoltcp = { version = "0.12", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+rtrb = "0.3"
+ratatui = "0.29"
 
 [build-dependencies]
 libbpf-cargo = "0.24"
