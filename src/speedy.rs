@@ -41,7 +41,7 @@ use std::os::fd::{AsFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, OpenObject, Xdp, XdpFlags};
@@ -184,22 +184,21 @@ pub enum XdpMode {
 }
 
 impl XdpMode {
-    fn flags(self) -> &'static [u16] {
+    /// Bind flags to try, in order, each with the name to report if it takes.
+    fn attempts(self) -> &'static [(u16, &'static str)] {
+        const ZC: (u16, &str) = (XDP_ZEROCOPY, "zero-copy");
+        const CP: (u16, &str) = (XDP_COPY, "copy mode");
         match self {
-            XdpMode::Copy => &[XDP_COPY],
-            XdpMode::ZeroCopy => &[XDP_ZEROCOPY],
-            XdpMode::Auto => &[XDP_ZEROCOPY, XDP_COPY],
-        }
-    }
-
-    fn label(flag: u16) -> &'static str {
-        if flag & XDP_ZEROCOPY != 0 {
-            "zero-copy"
-        } else {
-            "copy mode"
+            XdpMode::Copy => &[CP],
+            XdpMode::ZeroCopy => &[ZC],
+            XdpMode::Auto => &[ZC, CP],
         }
     }
 }
+
+/// How long `connect` may spend on a TCP handshake before a caller should
+/// give up. The socket does not enforce it; the caller owns the loop.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Config {
     pub ifindex: u32,
@@ -1133,7 +1132,7 @@ impl Xsk {
             xsk.fill_frames(FILL_SIZE);
 
             let mut last = io::Error::from(io::ErrorKind::InvalidInput);
-            for &flag in mode.flags() {
+            for &(flag, label) in mode.attempts() {
                 let sxdp = sockaddr_xdp {
                     sxdp_family: AF_XDP as u16,
                     sxdp_flags: flag | XDP_USE_NEED_WAKEUP,
@@ -1147,7 +1146,7 @@ impl Xsk {
                     std::mem::size_of::<sockaddr_xdp>() as libc::socklen_t,
                 ) == 0
                 {
-                    xsk.bind_label = XdpMode::label(flag);
+                    xsk.bind_label = label;
                     return Ok(xsk);
                 }
                 last = io::Error::last_os_error();

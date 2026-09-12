@@ -15,31 +15,27 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use rustssi::speedy::{self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode};
+use rustssi::speedy::{
+    self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode, CONNECT_TIMEOUT,
+};
 
 /// Every heap allocation the process makes, counted at the source.
 ///
 /// A steady-state packet loop should allocate nothing at all; this is how we
-/// find out rather than assume. Two relaxed adds per allocation, which only
+/// find out rather than assume. One relaxed add per allocation, which only
 /// costs anything if allocations happen, which is the thing being measured.
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 struct Counting;
 
+// No `realloc`: the default one calls `alloc`, so growth is counted anyway.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
-        ALLOC_BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
         System.alloc(l)
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         System.dealloc(p, l)
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        ALLOC_BYTES.fetch_add(new.saturating_sub(l.size()) as u64, Ordering::Relaxed);
-        System.realloc(p, l, new)
     }
 }
 
@@ -67,7 +63,6 @@ fn cpu_secs() -> f64 {
 /// there is no other way to know the blast is over.
 const IDLE: Duration = Duration::from_millis(500);
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Kernel UDP receive buffer. The 208 KiB default drops most of a blast that
 /// the AF_XDP RX ring absorbs, which would measure the buffer, not the stack.
@@ -226,7 +221,6 @@ fn main() -> Result<()> {
     // buffer); only what the consume loop itself allocates is interesting, and
     // that should be nothing at all.
     let allocs0 = ALLOCS.load(Ordering::Relaxed);
-    let abytes0 = ALLOC_BYTES.load(Ordering::Relaxed);
     let mut last = start;
     let mut msgs = 0u64;
     let mut bytes = 0u64;
@@ -284,14 +278,13 @@ fn main() -> Result<()> {
     };
 
     let allocs = ALLOCS.load(Ordering::Relaxed) - allocs0;
-    let alloc_bytes = ALLOC_BYTES.load(Ordering::Relaxed) - abytes0;
 
     println!(
         "{{\"stack\":\"{stack}\",\"proto\":\"{proto_name}\",\"count\":{count},\"size\":{size},\
 \"received\":{received},\"bytes\":{bytes},\"elapsed_s\":{elapsed:.6},\
 \"msgs_per_s\":{:.1},\"mbps\":{:.1},\"loss_pct\":{loss:.3},\
 \"cpu_s\":{cpu:.6},\"cpu_us_per_msg\":{us_per_msg:.3},\
-\"allocs\":{allocs},\"alloc_bytes\":{alloc_bytes}}}",
+\"allocs\":{allocs}}}",
         rate(received as f64),
         rate(bytes as f64 * 8.0 / 1e6),
     );

@@ -48,12 +48,6 @@ def report_rtt(proto, size, rtts):
         f"{proto} rtt {len(rtts)} x {size}B us: "
         f"min {rtts[0]:.1f} p50 {p(0.50):.1f} p99 {p(0.99):.1f} max {rtts[-1]:.1f}"
     )
-    print(
-        f'{{"proto":"{proto}","size":{size},"samples":{len(rtts)},'
-        f'"rtt_us_min":{rtts[0]:.3f},"rtt_us_p50":{p(0.50):.3f},'
-        f'"rtt_us_p99":{p(0.99):.3f},"rtt_us_max":{rtts[-1]:.3f}}}',
-        flush=True,
-    )
 
 
 def udp_pingpong(s, peer, count, size):

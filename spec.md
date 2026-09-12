@@ -135,13 +135,13 @@ count cannot be dropped by accident. UDP always takes the whole buffer; TCP
 takes what smoltcp's send buffer will accept right now and returns short —
 `Ok(0)` when the window is shut or the send half is closed — so a peer that
 stops reading never traps the caller in a spin. `recv` is the same shape: one
-pass over the rings, `WouldBlock` when nothing has arrived, `Ok(0)` at end of
+pass over the rings, `None` when nothing has arrived, `Some(0)` at end of
 stream. Neither call ever blocks, so the consumer owns the loop and decides
-when to give up — `main.rs` muxes stdin, TX and RX in a single pass this way.
+when to give up — `src/bin/bench.rs` muxes TX and RX in a single pass this way.
 `connect` does not block either: it inserts the flow and sends the SYN, then
 `poll_connect` drives the handshake one pass at a time, `Ok(true)` once the
 peer answers and `ConnectionRefused` on an RST. Nothing in the socket knows
-about deadlines or signals — `main.rs` owns both loops and both flags.
+about deadlines or signals; `CONNECT_TIMEOUT` is a constant the caller applies.
 
 Backpressure needs no machinery: TCP is bounded by smoltcp's own send and
 receive buffers, which close the window on the peer when the consumer stops
@@ -149,8 +149,8 @@ calling `recv`. UDP simply drops a datagram when the TX pool is empty, which
 is within its contract.
 
 End of stream is TCP-only: `recv` reports it when the connection goes
-inactive. UDP has no FIN, so a UDP `recv` just keeps reporting `WouldBlock` —
-a property consumers must handle, and `main.rs` does it with an idle window.
+inactive. UDP has no FIN, so a UDP `recv` just keeps reporting `None` — a
+property consumers must handle, and the bench does it with an idle window.
 
 ## Transports
 
@@ -250,12 +250,12 @@ Throughput runs report rate, loss, CPU per message and heap allocations, all
 measured in the guest; latency runs are timed entirely on the host, so the
 round trip needs no clock agreement between the two.
 
-`scripts/flame.sh` profiles one combination: `perf` records in the guest where
-the symbols are, `inferno` renders on the host. `cpu-clock`, not `cycles` — the
-guest has no vPMU.
+`scripts/suite.sh profile <stack> <proto>` profiles one combination: `perf`
+records in the guest where the symbols are, `inferno` renders on the host.
+`cpu-clock`, not `cycles` — the guest has no vPMU.
 
-`src/main.rs` is the reference consumer: a pipe that sends stdin and writes
-whatever `recv` returns to stdout, from a single loop on a pinned core.
+`src/bin/bench.rs` is the reference consumer: one loop that connects, drives
+the handshake, sends, and drains the rings on a pinned core.
 
 Three things had to be true before any of it received a byte, and each failed
 silently rather than loudly:

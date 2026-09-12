@@ -1,8 +1,9 @@
 #!/bin/bash
 # Kernel socket vs SpeedySocket, both transports, on the guest.
 #
-#     ./scripts/suite.sh throughput    how fast it drains a blast
-#     ./scripts/suite.sh latency       round trip time, guest echoes
+#     ./scripts/suite.sh throughput            how fast it drains a blast
+#     ./scripts/suite.sh latency               round trip time, guest echoes
+#     ./scripts/suite.sh profile <stack> <proto>   flamegraph of one run
 #
 # The host runs the load generator on the bridge (10.99.1.1); the guest runs
 # the bench binary against its virtio-net eth1 (10.99.1.2). Assumes the VM is
@@ -18,7 +19,9 @@ throughput) DEF_COUNT=100000 DEF_SIZES=1024 ;;
 # largest UDP payload that still fits one MTU: bigger and the reply comes back
 # IP-fragmented, which this stack drops by design.
 latency) DEF_COUNT=20000 DEF_SIZES="64 512 1472" ;;
-*) sed -n '2,8p' "$0" >&2; exit 1 ;;
+# Long enough to collect real samples, not a 150 ms blip.
+profile) DEF_COUNT=4000000 DEF_SIZES=1024 P_STACK=${2:-speedy} P_PROTO=${3:-tcp} ;;
+*) sed -n '2,9p' "$0" >&2; exit 1 ;;
 esac
 
 SSH=${SSH:-"ssh -p 2222 -o StrictHostKeyChecking=no fedora@127.0.0.1"}
@@ -143,6 +146,37 @@ run_case() {
     echo "$stack $proto $size $(sed -n 's/.*min \([0-9.]*\) p50 \([0-9.]*\) p99 \([0-9.]*\) max \([0-9.]*\).*/\1 \2 \3 \4/p' <<<"$line")" \
         >> "$RESULTS"
 }
+
+if [[ $MODE == profile ]]; then
+    port=$UDP_PORT
+    [[ $P_PROTO == tcp ]] && port=$TCP_PORT
+    out=${OUT:-$HERE/../flame-$P_STACK-$P_PROTO.svg}
+    script=$RESULTS.script
+    echo "profiling $P_STACK/$P_PROTO, $COUNT x $SIZES bytes at ${FREQ:-997}Hz"
+    # cpu-clock, not cycles: a guest without a vPMU counts nothing and the
+    # record comes back with only the exec stacks. -g walks frame pointers,
+    # which scripts/run.sh forces on; dwarf unwinding drops nearly every
+    # sample here.
+    $SSH "sudo perf record -q -e cpu-clock -F ${FREQ:-997} -g -o /tmp/perf.data -- \
+        $BENCH --stack $P_STACK --proto $P_PROTO --if $GUEST_IF \
+        --local-ip $GUEST_IP --peer-ip $PEER_IP --port $port \
+        --peer-mac $PEER_MAC --cpu $CPU --queue $QUEUE --count $COUNT --size $SIZES" \
+        2>/dev/null | tail -1
+    # --no-inline: perf otherwise shells out to addr2line per frame, which
+    # fails against the build-id cache here and emits binary junk.
+    $SSH 'sudo perf script -i /tmp/perf.data --no-inline \
+        -F comm,pid,tid,time,event,ip,sym,dso' > "$script" 2>/dev/null
+    [[ -s $script ]] || { echo "perf produced no samples" >&2; exit 1; }
+    inferno-collapse-perf < "$script" > "$RESULTS" || {
+        echo "could not fold the profile; first lines were:" >&2
+        head -3 "$script" >&2
+        exit 1
+    }
+    inferno-flamegraph --title "rustssi $P_STACK/$P_PROTO" < "$RESULTS" > "$out"
+    rm -f "$script"
+    echo "$(wc -l < "$RESULTS") unique stacks -> $out"
+    exit 0
+fi
 
 for size in $SIZES; do
     for stack in kernel speedy; do

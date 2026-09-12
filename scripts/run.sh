@@ -7,8 +7,8 @@
 #   ./scripts/run.sh --down          tear the VM down afterwards
 #
 # Idempotent: an already-running VM is reused, and the image is fetched only
-# the first time. Everything else (bench.sh, latency.sh, flame.sh) is called
-# with the ssh command this script derives, so none of them need configuring.
+# the first time. Everything below runs through scripts/suite.sh, which is
+# called with the ssh command this script derives, so it needs no configuring.
 set -u
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -40,7 +40,7 @@ die() { echo "run: $*" >&2; exit 1; }
 trap '[[ $DOWN == yes ]] && "$VM" down >/dev/null 2>&1' EXIT
 
 # 1. Binary first: no point booting a VM for code that does not compile.
-#    Frame pointers so the flamegraph has an interior; see scripts/flame.sh.
+#    Frame pointers so the flamegraph has an interior; -g needs them.
 say "building"
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --manifest-path "$ROOT/Cargo.toml" \
     2>&1 | tail -2 || die "build failed"
@@ -63,7 +63,7 @@ export SSH
 
 say "deploying"
 scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR "$ROOT/target/release/rustssi-bench" "$ROOT/target/release/rustssi" \
+    -o LogLevel=ERROR "$ROOT/target/release/rustssi-bench" \
     fedora@localhost:/home/fedora/ || die "deploy failed"
 
 # A stale generator from an earlier run owns the ports the suites need.
@@ -85,7 +85,7 @@ if [[ $FLAME == yes ]]; then
         pkill -f bench_peer.py 2>/dev/null
         sleep 0.3
         say "profiling $combo"
-        COUNT=$FLAME_COUNT "$HERE/flame.sh" $combo || rc=1
+        COUNT=$FLAME_COUNT "$HERE/suite.sh" profile $combo || rc=1
     done
 fi
 
