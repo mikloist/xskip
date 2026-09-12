@@ -5,8 +5,6 @@
 //! on a pinned core. stdin gets its own thread only because it is a blocking fd
 //! that has nothing to do with the packet path.
 
-mod speedy;
-
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -16,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use speedy::{Config, HugePage, Protocol, Sent, SpeedySocket};
+use rustssi::speedy::{self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode};
 
 /// Cleared by SIGINT/SIGTERM. Every loop in this file watches it — the socket
 /// itself has no notion of running, it just never blocks.
@@ -86,6 +84,7 @@ fn main() -> Result<()> {
             queue_id: 0,
             mtu,
             hugepage: HugePage::Mb2,
+            xdp_mode: XdpMode::Auto,
         },
     )
     .context("create speedy socket")?;
@@ -151,13 +150,13 @@ fn main() -> Result<()> {
 
         // One pass over the rings, then loop so stdin keeps flowing.
         match sock.recv(&mut buf) {
-            Ok(0) => break, // TCP FIN from the peer
-            Ok(n) => {
+            Some(0) => break, // TCP FIN from the peer
+            Some(n) => {
                 out.write_all(&buf[..n])?;
                 out.flush()?;
                 last_rx = Instant::now();
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            None => {
                 // UDP has no FIN. Once stdin is drained and the peer has been
                 // quiet for UDP_IDLE there is nothing left to wait for; TCP
                 // keeps waiting for a real FIN.
@@ -165,8 +164,6 @@ fn main() -> Result<()> {
                     break;
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => break,
-            Err(e) => return Err(e.into()),
         }
         std::hint::spin_loop();
     }

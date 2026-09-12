@@ -78,6 +78,7 @@ const XDP_UMEM_PGOFF_COMPLETION_RING: libc::off_t = 0x1_8000_0000;
 
 // bind() sxdp_flags
 const XDP_COPY: u16 = 1 << 1;
+const XDP_ZEROCOPY: u16 = 1 << 2;
 const XDP_USE_NEED_WAKEUP: u16 = 1 << 3;
 
 // ring flags field
@@ -172,6 +173,34 @@ impl HugePage {
     }
 }
 
+/// AF_XDP bind mode. `Copy` works everywhere; `ZeroCopy` needs a driver with
+/// `ndo_xsk_wakeup` and fails `EOPNOTSUPP` on one without it (veth, for one).
+/// `Auto` asks for zero-copy and falls back rather than refusing to bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XdpMode {
+    Copy,
+    ZeroCopy,
+    Auto,
+}
+
+impl XdpMode {
+    fn flags(self) -> &'static [u16] {
+        match self {
+            XdpMode::Copy => &[XDP_COPY],
+            XdpMode::ZeroCopy => &[XDP_ZEROCOPY],
+            XdpMode::Auto => &[XDP_ZEROCOPY, XDP_COPY],
+        }
+    }
+
+    fn label(flag: u16) -> &'static str {
+        if flag & XDP_ZEROCOPY != 0 {
+            "zero-copy"
+        } else {
+            "copy mode"
+        }
+    }
+}
+
 pub struct Config {
     pub ifindex: u32,
     pub our_ip: Ipv4Addr,
@@ -180,6 +209,7 @@ pub struct Config {
     pub queue_id: u32,
     pub mtu: usize,
     pub hugepage: HugePage,
+    pub xdp_mode: XdpMode,
 }
 
 pub struct SpeedySocket<'obj> {
@@ -209,15 +239,29 @@ impl<'obj> SpeedySocket<'obj> {
         }
 
         // Frames are sized to the link, so the UMEM is too.
-        let xsk = Xsk::new(cfg.ifindex, cfg.queue_id, cfg.mtu, cfg.hugepage)?;
+        let xsk = Xsk::new(
+            cfg.ifindex,
+            cfg.queue_id,
+            cfg.mtu,
+            cfg.hugepage,
+            cfg.xdp_mode,
+        )?;
         eprintln!(
-            "-- UMEM: {} MiB, {} x {}-byte frames on {} --",
+            "-- UMEM: {} MiB, {} x {}-byte frames on {}; bound {} on queue {} --",
             xsk.umem_len >> 20,
             FRAME_COUNT,
             xsk.frame_size,
-            xsk.huge.label()
+            xsk.huge.label(),
+            xsk.bind_label,
+            cfg.queue_id,
         );
 
+        // One socket, one ring: a packet landing on any other RX queue finds no
+        // entry here and falls through to the kernel, with nothing logged
+        // anywhere. On a multi-queue NIC the receiver must cut the device to one
+        // channel, or the flow is steered by hash and arrives roughly never.
+        // ponytail: single queue. One socket per ring, indexed by rx_queue_index,
+        // is the fix when a single core stops keeping up.
         skel.maps
             .xsks_map
             .update(
@@ -322,12 +366,16 @@ impl<'obj> SpeedySocket<'obj> {
         }
     }
 
-    pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        if !self.connected {
-            return Err(io::Error::from(io::ErrorKind::NotConnected));
+    /// One pass over the rings. `None` means nothing had arrived, `Some(0)` is
+    /// end of stream (TCP only; UDP has no FIN).
+    ///
+    /// Not a `Result`: an empty ring is the common case in a polling loop, and
+    /// building an `io::Error` for it was 3.5% of the profile. A socket that
+    /// was never connected also polls empty forever, so `connect` first.
+    pub fn recv(&mut self, buf: &mut [u8]) -> Option<usize> {
+        debug_assert!(self.connected, "recv before connect");
+        if buf.is_empty() || !self.connected {
+            return None;
         }
         match &mut self.plane {
             Plane::Tcp(t) => {
@@ -337,18 +385,16 @@ impl<'obj> SpeedySocket<'obj> {
                 if s.can_recv() {
                     if let Ok(n) = s.recv_slice(buf) {
                         if n > 0 {
-                            return Ok(n);
+                            return Some(n);
                         }
                     }
                 }
                 if !s.is_active() {
-                    return Ok(0);
+                    return Some(0);
                 }
-                Err(io::Error::from(io::ErrorKind::WouldBlock))
+                None
             }
-            Plane::Udp(u) => u
-                .recv_into(buf)
-                .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock)),
+            Plane::Udp(u) => u.recv_into(buf),
         }
     }
 
@@ -374,8 +420,10 @@ impl Drop for SpeedySocket<'_> {
 }
 
 impl io::Read for SpeedySocket<'_> {
+    /// `WouldBlock` for an empty ring, which is what `Read` has to say.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.recv(buf)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))
     }
 }
 
@@ -419,19 +467,51 @@ pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<RustssiSkel<'_
 pub struct XdpAttachment<'a> {
     skel: &'a RustssiSkel<'a>,
     ifindex: u32,
+    native: bool,
 }
 
+/// Native (driver) XDP first, generic second.
+///
+/// The mode is not cosmetic: an `XDP_ZEROCOPY` socket can only be fed by the
+/// driver's own ZC path, so a generic attachment redirects into a void and the
+/// socket receives nothing at all. Drivers without native XDP still work in
+/// generic mode, in copy mode only.
 pub fn attach_xdp<'a>(skel: &'a RustssiSkel<'a>, ifindex: u32) -> io::Result<XdpAttachment<'a>> {
-    Xdp::new(skel.progs.xdp_redirect_flow.as_fd())
-        .attach(ifindex as i32, XdpFlags::SKB_MODE)
-        .map_err(|e| io::Error::other(format!("attach xdp program: {e}")))?;
-    Ok(XdpAttachment { skel, ifindex })
+    let xdp = Xdp::new(skel.progs.xdp_redirect_flow.as_fd());
+    let mut last = io::Error::from(io::ErrorKind::InvalidInput);
+    for native in [true, false] {
+        let flags = if native {
+            XdpFlags::DRV_MODE
+        } else {
+            XdpFlags::SKB_MODE
+        };
+        match xdp.attach(ifindex as i32, flags) {
+            Ok(()) => {
+                eprintln!(
+                    "-- XDP attached in {} mode --",
+                    if native { "native" } else { "generic" }
+                );
+                return Ok(XdpAttachment {
+                    skel,
+                    ifindex,
+                    native,
+                });
+            }
+            Err(e) => last = io::Error::other(format!("attach xdp program: {e}")),
+        }
+    }
+    Err(last)
 }
 
 impl Drop for XdpAttachment<'_> {
     fn drop(&mut self) {
         let xdp = Xdp::new(self.skel.progs.xdp_redirect_flow.as_fd());
-        let _ = xdp.detach(self.ifindex as i32, XdpFlags::SKB_MODE);
+        let flags = if self.native {
+            XdpFlags::DRV_MODE
+        } else {
+            XdpFlags::SKB_MODE
+        };
+        let _ = xdp.detach(self.ifindex as i32, flags);
     }
 }
 
@@ -570,7 +650,19 @@ struct TcpPlane {
     iface: Interface,
     sockets: SocketSet<'static>,
     handle: SocketHandle,
+    clock: Instant,
+    ticks_left: u32,
 }
+
+/// Polls served from one clock reading before taking another.
+///
+/// `Instant::now` goes through the vDSO and then `SystemTime` arithmetic; at
+/// busy-poll rates it was a third of this stack's CPU, more than the packet
+/// work. smoltcp only needs time for its timers, which are millisecond-scale,
+/// so a batch of polls can share one reading.
+// ponytail: fixed batch. The staleness ceiling is 32 polls, microseconds while
+// spinning; make it deadline-based if a timer ever fires visibly late.
+const CLOCK_TICKS: u32 = 32;
 
 impl TcpPlane {
     fn new(xsk: Xsk, our_ip: Ipv4Addr, src_mac: [u8; 6], dst_mac: [u8; 6], mtu: usize) -> TcpPlane {
@@ -593,10 +685,18 @@ impl TcpPlane {
         });
 
         let mut sockets = SocketSet::new(Vec::new());
-        let handle = sockets.add(tcp::Socket::new(
+        let mut socket = tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0u8; 65535]),
             tcp::SocketBuffer::new(vec![0u8; 65535]),
-        ));
+        );
+        // Nagle holds a small trailing segment until the previous one is
+        // acknowledged, and the peer delays that ACK ~40 ms. A message that
+        // straddles the MSS therefore pays a 40 ms stall per round trip:
+        // measured at 1472 B, where the echo splits into 1460 + 12. This is
+        // what TCP_NODELAY turns off on a kernel socket, and the whole point
+        // of the stack is latency.
+        socket.set_nagle_enabled(false);
+        let handle = sockets.add(socket);
 
         TcpPlane {
             xsk,
@@ -604,12 +704,23 @@ impl TcpPlane {
             iface,
             sockets,
             handle,
+            clock: Instant::now(),
+            ticks_left: 0,
         }
     }
 
+    fn now(&mut self) -> Instant {
+        if self.ticks_left == 0 {
+            self.clock = Instant::now();
+            self.ticks_left = CLOCK_TICKS;
+        }
+        self.ticks_left -= 1;
+        self.clock
+    }
+
     fn poll(&mut self) {
-        self.iface
-            .poll(Instant::now(), &mut self.device, &mut self.sockets);
+        let now = self.now();
+        self.iface.poll(now, &mut self.device, &mut self.sockets);
         self.xsk.borrow_mut().kick_rx();
     }
 
@@ -910,12 +1021,19 @@ struct Xsk {
     tx: Ring,
     tx_free: Vec<u64>,
     huge: HugePage,
+    bind_label: &'static str,
 }
 
 impl Xsk {
-    /// Copy-mode AF_XDP socket on `ifindex`/`queue_id` with a dedicated UMEM,
-    /// its frames sized to hold one `mtu`-byte packet each.
-    fn new(ifindex: u32, queue_id: u32, mtu: usize, hugepage: HugePage) -> io::Result<Xsk> {
+    /// AF_XDP socket on `ifindex`/`queue_id` with a dedicated UMEM, its frames
+    /// sized to hold one `mtu`-byte packet each.
+    fn new(
+        ifindex: u32,
+        queue_id: u32,
+        mtu: usize,
+        hugepage: HugePage,
+        mode: XdpMode,
+    ) -> io::Result<Xsk> {
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
         let frame_size = frame_size_for(mtu, page_size)?;
         unsafe {
@@ -1008,28 +1126,33 @@ impl Xsk {
                 tx,
                 tx_free,
                 huge,
+                bind_label: "",
             };
 
             // Hand the kernel one frame per FILL slot to receive into.
             xsk.fill_frames(FILL_SIZE);
 
-            let sxdp = sockaddr_xdp {
-                sxdp_family: AF_XDP as u16,
-                sxdp_flags: XDP_COPY | XDP_USE_NEED_WAKEUP,
-                sxdp_ifindex: ifindex,
-                sxdp_queue_id: queue_id,
-                sxdp_shared_umem_fd: 0,
-            };
-            if libc::bind(
-                fd,
-                &sxdp as *const _ as *const libc::sockaddr,
-                std::mem::size_of::<sockaddr_xdp>() as libc::socklen_t,
-            ) < 0
-            {
-                return Err(io::Error::last_os_error());
+            let mut last = io::Error::from(io::ErrorKind::InvalidInput);
+            for &flag in mode.flags() {
+                let sxdp = sockaddr_xdp {
+                    sxdp_family: AF_XDP as u16,
+                    sxdp_flags: flag | XDP_USE_NEED_WAKEUP,
+                    sxdp_ifindex: ifindex,
+                    sxdp_queue_id: queue_id,
+                    sxdp_shared_umem_fd: 0,
+                };
+                if libc::bind(
+                    fd,
+                    &sxdp as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<sockaddr_xdp>() as libc::socklen_t,
+                ) == 0
+                {
+                    xsk.bind_label = XdpMode::label(flag);
+                    return Ok(xsk);
+                }
+                last = io::Error::last_os_error();
             }
-
-            Ok(xsk)
+            Err(last)
         }
     }
 

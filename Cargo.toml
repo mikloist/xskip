@@ -3,6 +3,10 @@ name = "rustssi"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "rustssi-bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 libbpf-rs = "0.24"
 libc = "0.2"
@@ -13,6 +17,12 @@ smoltcp = { version = "0.12", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
 ] }
+
+# Symbols in release: a stripped -O2 binary profiles as one opaque frame, and
+# reading the flamegraph is the point. Frame pointers come from RUSTFLAGS in
+# scripts/flame.sh, there is no profile key for them.
+[profile.release]
+debug = 1
 
 [build-dependencies]
 libbpf-cargo = "0.24"

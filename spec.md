@@ -233,33 +233,54 @@ xattr, so `setcap` has to be repeated after every build.
 
 ## Test harness
 
-`scripts/smoke.sh` (run as root) builds a network namespace with a veth pair
-and runs both socket variants end to end against `scripts/echo_peer.py`, which
-echoes `echo:` + payload on UDP/6667 and TCP/6668. The XDP program attaches to
-the host veth endpoint in generic mode and the config map is populated with the
-peer's `(IPv4, port)`.
+One entry point, `scripts/run.sh`: build, boot the guest, deploy, run both
+suites, render flamegraphs. Everything below is what it drives.
 
-The peer must live in its own netns: with both addresses local the kernel
-short-circuits them over `lo`, nothing traverses the veth, and AF_XDP sees no
-traffic at all. Each case also gets a freshly created veth, because an AF_XDP
-pool release is deferred by the kernel and a netlink-attached XDP program
-outlives the process that attached it — reusing one link makes the second bind
-fail `EBUSY` for reasons unrelated to the code under test.
+`scripts/vm/vm.sh` boots a Fedora Cloud guest (kernel 6.19) on an isolated
+libvirt bridge, because veth cannot do zero-copy and the loopback path measures
+nothing. The guest NIC is `virtio-net-pci` with `mq=on,rss=on` and, crucially,
+`iommu_platform=on,disable-legacy=on`: without `VIRTIO_F_ACCESS_PLATFORM` the
+`XDP_ZEROCOPY` bind fails `EINVAL`. Guest CPUs 2 and 3 are isolated
+(`isolcpus`), and each vCPU thread is pinned to a host core.
+
+`scripts/suite.sh throughput|latency` runs kernel-socket and `SpeedySocket`
+receivers for both transports against `scripts/bench_peer.py`, which blasts a
+fixed count of fixed-size messages on request, or ping-pongs them for latency.
+Throughput runs report rate, loss, CPU per message and heap allocations, all
+measured in the guest; latency runs are timed entirely on the host, so the
+round trip needs no clock agreement between the two.
+
+`scripts/flame.sh` profiles one combination: `perf` records in the guest where
+the symbols are, `inferno` renders on the host. `cpu-clock`, not `cycles` — the
+guest has no vPMU.
 
 `src/main.rs` is the reference consumer: a pipe that sends stdin and writes
 whatever `recv` returns to stdout, from a single loop on a pinned core.
 
+Three things had to be true before any of it received a byte, and each failed
+silently rather than loudly:
+
+- Bind with `XDP_ZEROCOPY`, not `XDP_COPY`.
+- Attach the program in native (`DRV_MODE`) XDP. A generic attachment cannot
+  feed a zero-copy socket, and redirects simply vanish.
+- Reduce the device to one channel. The socket is registered as
+  `xsks_map[queue]`; anything steered elsewhere falls through to the kernel.
+  Collapsing the RSS indirection table is *not* enough on virtio-net — the host
+  tap keeps its own steering, and inbound TCP still landed on ring 1 about half
+  the time.
+
 ## Status
 
-**Done.** netns + veth + eBPF redirect into the `XSKMAP`; UMEM, rings and bind;
-`SpeedySocket` with both transports, polling `send`/`recv`. Verified by
-`scripts/smoke.sh` passing UDP and TCP end to end, plus unit tests covering the
-hand-rolled UDP framing (round-trip, wrong-flow rejection, non-IPv4 rejection).
+**Done.** eBPF redirect into the `XSKMAP`; UMEM, rings and bind; `SpeedySocket`
+with both transports, polling `send`/`recv`; zero-copy on virtio-net in a
+pinned QEMU guest. Verified by `scripts/run.sh` passing both suites, plus unit
+tests covering the hand-rolled UDP framing (round-trip, wrong-flow rejection,
+non-IPv4 rejection, a full-MTU datagram).
 
 **Not done, in rough order of interest.**
 
-1. **Zero-copy on real hardware.** Bind `XDP_ZEROCOPY` on a capable NIC. The
-   userspace side should not change; this is the payoff the design exists for.
+1. **Zero-copy on real hardware.** The virtio-net guest proves the path; a
+   capable physical NIC is the payoff the design exists for.
 2. **Hand out UMEM frames.** Let `recv` lend the consumer the frame itself
    rather than copying the payload into its slice. Needs a lifetime or
    refcount discipline so the frame returns to the FILL ring on time.
