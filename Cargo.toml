@@ -13,8 +13,6 @@ smoltcp = { version = "0.12", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
 ] }
-rtrb = "0.3"
-ratatui = "0.29"
 
 [build-dependencies]
 libbpf-cargo = "0.24"
