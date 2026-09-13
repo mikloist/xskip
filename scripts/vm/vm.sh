@@ -18,7 +18,7 @@
 set -u
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
-CACHE=${VM_CACHE:-$HOME/.cache/rustssi-vm}
+CACHE=${VM_CACHE:-$HOME/.cache/xskip-vm}
 REL=44
 BUILD=1.7
 IMG=Fedora-Cloud-Base-Generic-$REL-$BUILD.x86_64.qcow2
@@ -30,7 +30,7 @@ HOST_IP=10.99.1.1
 GUEST_IP=10.99.1.2
 GUEST_MAC=52:54:00:99:01:02
 BRIDGE=virbr0
-LIBVIRT_NET=rustssi
+LIBVIRT_NET=xskip
 HELPER=/usr/libexec/qemu-bridge-helper
 VIRSH="-c qemu:///system"
 QUEUES=${VM_QUEUES:-2}
@@ -66,7 +66,7 @@ cpu_list() {
 
 cmd_image() {
 	mkdir -p "$CACHE" || die "cannot create $CACHE"
-	[[ -f $KEY ]] || ssh-keygen -q -t ed25519 -N '' -C rustssi-vm -f "$KEY" || die "ssh-keygen failed"
+	[[ -f $KEY ]] || ssh-keygen -q -t ed25519 -N '' -C xskip-vm -f "$KEY" || die "ssh-keygen failed"
 	if [[ ! -f $BASE ]]; then
 		echo "vm: downloading $IMG"
 		curl -fL# -C - -o "$BASE.part" "$MIRROR/$IMG" || die "download failed"
@@ -87,7 +87,7 @@ cmd_image() {
 make_seed() {
 	local d
 	d=$(mktemp -d) || die "mktemp failed"
-	printf 'instance-id: rustssi-1\nlocal-hostname: rustssi-vm\n' >"$d/meta-data"
+	printf 'instance-id: xskip-1\nlocal-hostname: xskip-vm\n' >"$d/meta-data"
 	cat >"$d/user-data" <<EOF
 #cloud-config
 users:

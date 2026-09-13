@@ -38,12 +38,12 @@ CHUNK_SIZE=${CHUNK_SIZE:-4000}
 CPU=${CPU:-2}
 PEER_CPU=${PEER_CPU:-12}
 QUEUE=${QUEUE:-0}
-BENCH=${BENCH:-/home/fedora/rustssi-bench}
+BENCH=${BENCH:-/home/fedora/xskip-bench}
 
 PEER_PY=$HERE/bench_peer.py
-PEER_LOG=/tmp/rustssi_${MODE}_peer.$$.log
-ERR_LOG=/tmp/rustssi_${MODE}_err.$$
-RESULTS=/tmp/rustssi_${MODE}_results.$$
+PEER_LOG=/tmp/xskip_${MODE}_peer.$$.log
+ERR_LOG=/tmp/xskip_${MODE}_err.$$
+RESULTS=/tmp/xskip_${MODE}_results.$$
 PEER_PID=
 MAX_CHANNELS=
 
@@ -199,7 +199,7 @@ if [[ $MODE == profile ]]; then
         head -3 "$script" >&2
         exit 1
     }
-    inferno-flamegraph --title "rustssi $P_STACK/$P_PROTO" < "$RESULTS" > "$out"
+    inferno-flamegraph --title "xskip \$P_STACK/$P_PROTO" < "$RESULTS" > "$out"
     rm -f "$script"
     echo "$(wc -l < "$RESULTS") unique stacks -> $out"
     exit 0

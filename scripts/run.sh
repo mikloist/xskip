@@ -17,7 +17,7 @@ set -u -o pipefail
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/.." && pwd)
 VM=$HERE/vm/vm.sh
-CACHE=${VM_CACHE:-$HOME/.cache/rustssi-vm}
+CACHE=${VM_CACHE:-$HOME/.cache/xskip-vm}
 KEY=$CACHE/id_ed25519
 SSH_PORT=${VM_SSH_PORT:-2222}
 
@@ -71,7 +71,7 @@ export SSH
 
 say "deploying"
 scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR "$ROOT/target/release/rustssi-bench" \
+    -o LogLevel=ERROR "$ROOT/target/release/xskip-bench" \
     fedora@localhost:/home/fedora/ || die "deploy failed"
 
 # A stale generator from an earlier run owns the ports the suites need.
@@ -107,9 +107,9 @@ if [[ $ALLOC == yes ]]; then
         --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -2 || die "dhat build failed"
     scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-        "$ROOT/target/release/rustssi-bench" \
-        fedora@localhost:/home/fedora/rustssi-bench-dhat || die "dhat deploy failed"
-    DHAT=yes COUNT=$ALLOC_COUNT BENCH=/home/fedora/rustssi-bench-dhat \
+        "$ROOT/target/release/xskip-bench" \
+        fedora@localhost:/home/fedora/xskip-bench-dhat || die "dhat deploy failed"
+    DHAT=yes COUNT=$ALLOC_COUNT BENCH=/home/fedora/xskip-bench-dhat \
         "$HERE/suite.sh" throughput || rc=1
     # The profiles are written in the guest; bring them here to look at.
     $SSH sudo chown fedora: '~/dhat-*.json' 2>/dev/null

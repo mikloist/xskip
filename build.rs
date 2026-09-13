@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 use libbpf_cargo::SkeletonBuilder;
 
-const SRC: &str = "src/bpf/rustssi.bpf.c";
+const SRC: &str = "src/bpf/xskip.bpf.c";
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"))
-        .join("rustssi.skel.rs");
+        .join("xskip.skel.rs");
 
     SkeletonBuilder::new()
         .source(SRC)

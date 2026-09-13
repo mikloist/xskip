@@ -53,7 +53,7 @@ use smoltcp::wire::{
 };
 
 pub mod skel {
-    include!(concat!(env!("OUT_DIR"), "/rustssi.skel.rs"));
+    include!(concat!(env!("OUT_DIR"), "/xskip.skel.rs"));
 }
 use skel::*;
 
@@ -181,7 +181,7 @@ pub struct Config {
 }
 
 pub struct SpeedySocket<'obj> {
-    skel: &'obj RustssiSkel<'obj>,
+    skel: &'obj XskipSkel<'obj>,
     queue_id: u32,
     mtu: usize,
     our_ip: Ipv4Addr,
@@ -195,7 +195,7 @@ impl<'obj> SpeedySocket<'obj> {
     /// Build the UMEM and rings, bind, and register in `xsks_map` so the
     /// already-attached XDP program can redirect to us.
     pub fn new(
-        skel: &'obj RustssiSkel<'obj>,
+        skel: &'obj XskipSkel<'obj>,
         proto: Protocol,
         cfg: Config,
     ) -> io::Result<SpeedySocket<'obj>> {
@@ -415,8 +415,8 @@ pub fn ifindex(ifname: &str) -> io::Result<u32> {
 
 /// Open and load the BPF skeleton into caller-owned storage. `obj` has to
 /// outlive every socket built against the result.
-pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<RustssiSkel<'_>> {
-    RustssiSkelBuilder::default()
+pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<XskipSkel<'_>> {
+    XskipSkelBuilder::default()
         .open(obj)
         .map_err(|e| io::Error::other(format!("open skeleton: {e}")))?
         .load()
@@ -430,7 +430,7 @@ pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<RustssiSkel<'_
 /// a stale program keeps stealing packets from the kernel stack, and leaves
 /// the queue's AF_XDP pool registered so the next bind fails `EBUSY`.
 pub struct XdpAttachment<'a> {
-    skel: &'a RustssiSkel<'a>,
+    skel: &'a XskipSkel<'a>,
     ifindex: u32,
     native: bool,
 }
@@ -441,7 +441,7 @@ pub struct XdpAttachment<'a> {
 /// driver's own ZC path, so a generic attachment redirects into a void and the
 /// socket receives nothing at all. Drivers without native XDP still work in
 /// generic mode, in copy mode only.
-pub fn attach_xdp<'a>(skel: &'a RustssiSkel<'a>, ifindex: u32) -> io::Result<XdpAttachment<'a>> {
+pub fn attach_xdp<'a>(skel: &'a XskipSkel<'a>, ifindex: u32) -> io::Result<XdpAttachment<'a>> {
     let xdp = Xdp::new(skel.progs.xdp_redirect_flow.as_fd());
     let mut last = io::Error::from(io::ErrorKind::InvalidInput);
     for flags in [XdpFlags::DRV_MODE, XdpFlags::SKB_MODE] {

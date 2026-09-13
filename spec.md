@@ -1,4 +1,4 @@
-# Rustssi Spec
+# xskip Spec
 
 A fast userspace networking stack. Packets bypass the kernel stack via XDP,
 land in an AF_XDP UMEM, and are reassembled (TCP) or unwrapped (UDP) in

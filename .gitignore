@@ -1,3 +1,4 @@
 /target
 flame-*.svg
 dhat-*.json
+__pycache__/

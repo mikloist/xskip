@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load generator for the rustssi benchmark. Runs on the host.
+"""Load generator for the xskip benchmark. Runs on the host.
 
 The guest is the client: it sends one control message "RUSTSSI <count> <size>\\n"
 and we blast <count> messages of <size> bytes at it as fast as the socket takes

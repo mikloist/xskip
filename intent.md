@@ -1,4 +1,4 @@
-# Rustssi: zerocopy userspace networking stack
+# xskip: zerocopy userspace networking stack
 
 Stupidly fast, overkill-by-design transport. Packets land in userspace via
 AF_XDP and stay uncopied until a consumer takes them off the queue.

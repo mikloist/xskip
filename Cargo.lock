@@ -601,18 +601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustssi"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dhat",
- "libbpf-cargo",
- "libbpf-rs",
- "libc",
- "smoltcp",
-]
-
-[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -825,6 +813,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "xskip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dhat",
+ "libbpf-cargo",
+ "libbpf-rs",
+ "libc",
+ "smoltcp",
 ]
 
 [[package]]

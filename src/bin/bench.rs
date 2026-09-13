@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use rustssi::speedy::{
+use xskip::speedy::{
     self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode, CONNECT_TIMEOUT,
 };
 
@@ -27,7 +27,7 @@ use rustssi::speedy::{
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
-const USAGE: &str = "usage: rustssi-bench --stack <kernel|speedy> --proto <udp|tcp> \
+const USAGE: &str = "usage: xskip-bench --stack <kernel|speedy> --proto <udp|tcp> \
 --if <NAME> --local-ip <IPV4> --peer-ip <IPV4> --port <N> --peer-mac <MAC> --cpu <N> \
 --queue <N> --count <N> --size <N> [--xdp-mode <copy|zerocopy|auto>] [--mode <consume|echo>]\n\
 (--if, --peer-mac, --queue, --xdp-mode are ignored by the kernel stack;\n\
