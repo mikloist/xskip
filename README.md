@@ -1,7 +1,6 @@
 # xskip: zerocopy userspace networking stack
 
-Stupidly fast, overkill-by-design transport. Packets land in userspace via
-AF_XDP and stay uncopied until a consumer takes them off the queue.
+Kernel bypass exploratory work. Packets land in userspace via AF_XDP and stay uncopied until a consumer takes them off the queue.
 
 ## What this project is for
 I know this is mostly a solved problem, by onload etc, however it never hurts to discover that how could they work in principle.
@@ -17,7 +16,7 @@ I only really cared about the hot-path, the rest of the harness and benchmarks a
 
 ## Results
 
-Latency numbers are in us
+Latency numbers are in microseconds:
 
 |stack  |  proto | bytes  |    min   |   p50   |   p99   |   max|
 |-------|--------|--------|----------|---------|---------|------|
@@ -34,12 +33,7 @@ Latency numbers are in us
 |kernel |  tcp   |  1472  |   25.8   |  33.0   |  44.3   |1035.3|
 |xskip  |  tcp   |  1472  |   17.8   |  31.0   |  42.3   |  78.3|
 
-udp   64B: xskip p50   16.7 us vs kernel   26.8 us (1.60x lower)
-udp  512B: xskip p50   14.9 us vs kernel   25.6 us (1.72x lower)
-udp 1472B: xskip p50   14.7 us vs kernel   25.9 us (1.76x lower)
-tcp   64B: xskip p50   18.5 us vs kernel   28.0 us (1.51x lower)
-tcp  512B: xskip p50   17.9 us vs kernel   28.4 us (1.59x lower)
-tcp 1472B: xskip p50   31.0 us vs kernel   33.0 us (1.06x lower)
+all the packets are max MTU sized. Throughput wise kernel clearly wins because it has better load handling. (BBR, GRO etc) but throughput was never the goal.
 
 ## Requirements
 The stack delivers raw payloads and nothing more: it terminates TCP and UDP in
