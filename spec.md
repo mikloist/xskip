@@ -251,12 +251,14 @@ Throughput runs report rate, loss, CPU per message and heap allocations, all
 measured in the guest; latency runs are timed entirely on the host, so the
 round trip needs no clock agreement between the two.
 
-Allocations are counted by a `#[global_allocator]` in the bench, snapshotted
-either side of the consume loop so setup is excluded; the steady state reads
-zero. `cargo build --release --features dhat` swaps that counter for dhat's
-allocator and opens its profiler over the same window, which answers the next
-question — which allocation, with a stack — and writes `dhat-heap.json` beside
-the run.
+Allocations are measured by dhat, behind `--features dhat`, which replaces the
+global allocator and opens its profiler over the consume loop only, so setup —
+the UMEM, smoltcp's buffers, the BPF skeleton — is excluded. It reports the
+count in the run's JSON and writes `dhat-heap.json` with a stack per
+allocation site. `scripts/run.sh` runs that pass last, with its own binary:
+the profiler's bookkeeping would distort every timing above it. The steady
+state allocates nothing, so the table reads zero; a plain build prints `-`
+rather than a zero it never checked.
 
 `scripts/suite.sh profile <stack> <proto>` profiles one combination: `perf`
 records in the guest where the symbols are, `inferno` renders on the host.

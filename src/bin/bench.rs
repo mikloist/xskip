@@ -4,15 +4,11 @@
 //! Sends one `RUSTSSI <count> <size>\n` control message to the peer, then eats
 //! what the peer blasts back and prints one JSON line on stdout.
 
-#[cfg(not(feature = "dhat"))]
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
-#[cfg(not(feature = "dhat"))]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -21,52 +17,15 @@ use rustssi::speedy::{
     self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode, CONNECT_TIMEOUT,
 };
 
-/// Every heap allocation the process makes, counted at the source.
-///
-/// A steady-state packet loop should allocate nothing at all; this is how we
-/// find out rather than assume. One relaxed add per allocation, which only
-/// costs anything if allocations happen, which is the thing being measured.
-///
-/// `--features dhat` swaps this for dhat's allocator, which answers the next
-/// question — *which* allocation — at the cost of recording a backtrace for
-/// each one.
-#[cfg(not(feature = "dhat"))]
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(not(feature = "dhat"))]
-struct Counting;
-
-// No `realloc`: the default one calls `alloc`, so growth is counted anyway.
-#[cfg(not(feature = "dhat"))]
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        System.alloc(l)
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
-    }
-}
-
-#[cfg(not(feature = "dhat"))]
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
+/// Heap profiling lives behind `--features dhat`: it swaps the global
+/// allocator, opens a profiler over the consume loop only, and reports both
+/// the count and a stack per allocation site. A steady-state packet loop
+/// should allocate nothing at all, and this is how we find out rather than
+/// assume. The default build has no allocator of its own and says nothing
+/// about allocations.
 #[cfg(feature = "dhat")]
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
-
-/// Allocations so far, from whichever allocator is in play.
-fn allocs_now() -> u64 {
-    #[cfg(not(feature = "dhat"))]
-    {
-        ALLOCS.load(Ordering::Relaxed)
-    }
-    #[cfg(feature = "dhat")]
-    {
-        dhat::HeapStats::get().total_blocks
-    }
-}
 
 const USAGE: &str = "usage: rustssi-bench --stack <kernel|speedy> --proto <udp|tcp> \
 --if <NAME> --local-ip <IPV4> --peer-ip <IPV4> --port <N> --peer-mac <MAC> --cpu <N> \
@@ -266,10 +225,6 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
     let cpu0 = cpu_secs();
-    // Setup allocates plenty (UMEM, smoltcp buffers, the skeleton, this
-    // buffer); only what the consume loop itself allocates is interesting, and
-    // that should be nothing at all.
-    let allocs0 = allocs_now();
     let mut last = start;
     let mut msgs = 0u64;
     let mut bytes = 0u64;
@@ -313,10 +268,14 @@ fn main() -> Result<()> {
         }
     }
     // Read before the drop: dhat's stats are only available while its profiler
-    // is alive, and dropping it is what writes dhat-heap.json.
-    let allocs = allocs_now() - allocs0;
+    // is alive, and dropping it is what writes dhat-heap.json. Without the
+    // feature there is no allocator to ask, so the field is simply absent.
+    #[cfg(feature = "dhat")]
+    let allocs = format!(",\"allocs\":{}", dhat::HeapStats::get().total_blocks);
     #[cfg(feature = "dhat")]
     drop(dhat);
+    #[cfg(not(feature = "dhat"))]
+    let allocs = "";
 
     // The loop exits either on the target count or on the idle cutoff. `last`
     // is only sampled every 64 messages, so use it for the idle exit and the
@@ -350,8 +309,7 @@ fn main() -> Result<()> {
         "{{\"stack\":\"{stack}\",\"proto\":\"{proto_name}\",\"count\":{count},\"size\":{size},\
 \"received\":{received},\"bytes\":{bytes},\"elapsed_s\":{elapsed:.6},\
 \"msgs_per_s\":{:.1},\"mbps\":{:.1},\"loss_pct\":{loss:.3},\
-\"cpu_s\":{cpu:.6},\"cpu_us_per_msg\":{us_per_msg:.3},\
-\"allocs\":{allocs}}}",
+\"cpu_s\":{cpu:.6},\"cpu_us_per_msg\":{us_per_msg:.3}{allocs}}}",
         rate(received as f64),
         rate(bytes as f64 * 8.0 / 1e6),
     );

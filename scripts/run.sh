@@ -4,6 +4,7 @@
 #   ./scripts/run.sh                 everything
 #   ./scripts/run.sh --quick         smaller counts, no flamegraphs
 #   ./scripts/run.sh --no-flame      benchmarks only
+#   ./scripts/run.sh --no-alloc      skip the dhat allocation pass
 #   ./scripts/run.sh --down          tear the VM down afterwards
 #
 # Idempotent: an already-running VM is reused, and the image is fetched only
@@ -21,17 +22,22 @@ KEY=$CACHE/id_ed25519
 SSH_PORT=${VM_SSH_PORT:-2222}
 
 FLAME=yes
+ALLOC=yes
 DOWN=no
 COUNT=${COUNT:-500000}
 LAT_COUNT=${LAT_COUNT:-20000}
 FLAME_COUNT=${FLAME_COUNT:-4000000}
+# Small: dhat records a backtrace per allocation, and the answer wanted here is
+# how many, not how fast.
+ALLOC_COUNT=${ALLOC_COUNT:-20000}
 
 for a in "$@"; do
     case $a in
-    --quick) COUNT=100000; LAT_COUNT=5000; FLAME=no ;;
+    --quick) COUNT=100000; LAT_COUNT=5000; FLAME=no; ALLOC=no ;;
     --no-flame) FLAME=no ;;
+    --no-alloc) ALLOC=no ;;
     --down) DOWN=yes ;;
-    -h | --help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 1 ;;
     esac
 done
@@ -89,6 +95,25 @@ if [[ $FLAME == yes ]]; then
         say "profiling $combo"
         COUNT=$FLAME_COUNT "$HERE/suite.sh" profile $combo || rc=1
     done
+fi
+
+# Last, and with its own binary: dhat replaces the global allocator, so a
+# build carrying it would distort every number above.
+if [[ $ALLOC == yes ]]; then
+    pkill -f bench_peer.py 2>/dev/null
+    sleep 0.3
+    say "allocations: dhat over the consume loop"
+    RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --features dhat \
+        --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -2 || die "dhat build failed"
+    scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        "$ROOT/target/release/rustssi-bench" \
+        fedora@localhost:/home/fedora/rustssi-bench-dhat || die "dhat deploy failed"
+    COUNT=$ALLOC_COUNT BENCH=/home/fedora/rustssi-bench-dhat \
+        "$HERE/suite.sh" throughput || rc=1
+    # Leave the plain binary in place for the next run.
+    RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release \
+        --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
 fi
 
 pkill -f bench_peer.py 2>/dev/null

@@ -19,10 +19,13 @@ def throughput(path):
              "core %", "allocs"))
     for r in rows:
         util = r.get("cpu_s", 0.0) / r["elapsed_s"] * 100 if r.get("elapsed_s") else 0.0
-        print("%-8s %-5s %12.1f %10.1f %8.3f %10.3f %8.1f %8d"
+        # Only a dhat build measures allocations; a plain one omits the field
+        # rather than reporting a zero it did not check.
+        allocs = r["allocs"] if "allocs" in r else "-"
+        print("%-8s %-5s %12.1f %10.1f %8.3f %10.3f %8.1f %8s"
               % (r["stack"], r["proto"], r["msgs_per_s"],
                  r["mbps"] * 1e6 / 8 / (1 << 20), r["loss_pct"],
-                 r.get("cpu_us_per_msg", 0.0), util, r.get("allocs", 0)))
+                 r.get("cpu_us_per_msg", 0.0), util, allocs))
     by = {(r["stack"], r["proto"]): r for r in rows}
     missing = [f"{s}/{p}" for p in PROTOS for s in STACKS if (s, p) not in by]
     for proto in PROTOS:
