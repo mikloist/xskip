@@ -465,12 +465,8 @@ pub struct XdpAttachment<'a> {
 pub fn attach_xdp<'a>(skel: &'a RustssiSkel<'a>, ifindex: u32) -> io::Result<XdpAttachment<'a>> {
     let xdp = Xdp::new(skel.progs.xdp_redirect_flow.as_fd());
     let mut last = io::Error::from(io::ErrorKind::InvalidInput);
-    for native in [true, false] {
-        let flags = if native {
-            XdpFlags::DRV_MODE
-        } else {
-            XdpFlags::SKB_MODE
-        };
+    for flags in [XdpFlags::DRV_MODE, XdpFlags::SKB_MODE] {
+        let native = flags.bits() == XdpFlags::DRV_MODE.bits();
         match xdp.attach(ifindex as i32, flags) {
             Ok(()) => {
                 eprintln!(
