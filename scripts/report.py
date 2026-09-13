@@ -8,7 +8,7 @@ usage: report.py throughput <file>   # one bench JSON line per run
 import json
 import sys
 
-STACKS = ("kernel", "speedy")
+STACKS = ("kernel", "xskip")
 PROTOS = ("udp", "tcp")
 
 
@@ -29,9 +29,9 @@ def throughput(path):
     by = {(r["stack"], r["proto"]): r for r in rows}
     missing = [f"{s}/{p}" for p in PROTOS for s in STACKS if (s, p) not in by]
     for proto in PROTOS:
-        k, s = by.get(("kernel", proto)), by.get(("speedy", proto))
+        k, s = by.get(("kernel", proto)), by.get(("xskip", proto))
         if k and s and k["msgs_per_s"]:
-            print("%s: speedy is %.2fx the rate" % (proto, s["msgs_per_s"] / k["msgs_per_s"]))
+            print("%s: xskip is %.2fx the rate" % (proto, s["msgs_per_s"] / k["msgs_per_s"]))
     # The generator is a single Python process and the receivers keep up, so
     # the rate is what the sender offered, not what the stack can take. cpu per
     # message means different things either side: the polling stack spins while
@@ -59,9 +59,9 @@ def latency(path):
     print()
     for proto in PROTOS:
         for size in sizes:
-            k, s = by.get(("kernel", proto, size)), by.get(("speedy", proto, size))
+            k, s = by.get(("kernel", proto, size)), by.get(("xskip", proto, size))
             if k and s and s[1]:
-                print("%s %4dB: speedy p50 %6.1f us vs kernel %6.1f us (%.2fx lower)"
+                print("%s %4dB: xskip p50 %6.1f us vs kernel %6.1f us (%.2fx lower)"
                       % (proto, size, s[1], k[1], k[1] / s[1]))
     return [f"{s}/{p} {z}B" for p in PROTOS for z in sizes for s in STACKS
             if (s, p, z) not in by]

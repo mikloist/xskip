@@ -1,7 +1,7 @@
-//! `SpeedySocket` — an AF_XDP socket shaped like a UNIX socket.
+//! `Socket` - an AF_XDP socket shaped like a UNIX socket.
 //!
 //! ```text
-//! SpeedySocket::new()  UMEM + 4 rings + bind, load BPF skeleton,
+//! Socket::new()  UMEM + 4 rings + bind, load BPF skeleton,
 //!                      xsks_map[queue] = fd, attach XDP
 //! .connect(remote)     insert (ip, port) into config_map so the XDP program
 //!                      starts redirecting; TCP additionally handshakes
@@ -11,7 +11,7 @@
 //!
 //! Single-threaded by construction. `send` and `recv` never block: each drives
 //! the rings once on whatever thread calls them and returns what it managed to
-//! move, so the caller owns the loop — pin that thread with [`pin_cpu`] if you
+//! move, so the caller owns the loop - pin that thread with [`pin_cpu`] if you
 //! want a hot core. Nothing here blocks at all: `connect` only sends the SYN,
 //! and `poll_connect` reports how the handshake is going.
 //!
@@ -180,7 +180,7 @@ pub struct Config {
     pub xdp_mode: XdpMode,
 }
 
-pub struct SpeedySocket<'obj> {
+pub struct Socket<'obj> {
     skel: &'obj XskipSkel<'obj>,
     queue_id: u32,
     mtu: usize,
@@ -191,14 +191,14 @@ pub struct SpeedySocket<'obj> {
     plane: Plane,
 }
 
-impl<'obj> SpeedySocket<'obj> {
+impl<'obj> Socket<'obj> {
     /// Build the UMEM and rings, bind, and register in `xsks_map` so the
     /// already-attached XDP program can redirect to us.
     pub fn new(
         skel: &'obj XskipSkel<'obj>,
         proto: Protocol,
         cfg: Config,
-    ) -> io::Result<SpeedySocket<'obj>> {
+    ) -> io::Result<Socket<'obj>> {
         if cfg.mtu <= UDP_OVERHEAD {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -260,7 +260,7 @@ impl<'obj> SpeedySocket<'obj> {
             }),
         };
 
-        Ok(SpeedySocket {
+        Ok(Socket {
             skel,
             queue_id: cfg.queue_id,
             mtu: cfg.mtu,
@@ -371,7 +371,7 @@ impl<'obj> SpeedySocket<'obj> {
     }
 }
 
-impl Drop for SpeedySocket<'_> {
+impl Drop for Socket<'_> {
     fn drop(&mut self) {
         if let Some(remote) = self.remote {
             let _ = self
@@ -384,7 +384,7 @@ impl Drop for SpeedySocket<'_> {
     }
 }
 
-impl io::Read for SpeedySocket<'_> {
+impl io::Read for Socket<'_> {
     /// `WouldBlock` for an empty ring, which is what `Read` has to say.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.recv(buf)
@@ -392,7 +392,7 @@ impl io::Read for SpeedySocket<'_> {
     }
 }
 
-impl io::Write for SpeedySocket<'_> {
+impl io::Write for Socket<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.send(buf).map(|Sent(n)| n)
     }
@@ -426,7 +426,7 @@ pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<XskipSkel<'_>>
 /// An attached XDP program, detached on drop.
 ///
 /// Attachment is interface-wide, so it outlives any single socket and is the
-/// caller's to hold. Tying it to a guard means no early return can leak it —
+/// caller's to hold. Tying it to a guard means no early return can leak it -
 /// a stale program keeps stealing packets from the kernel stack, and leaves
 /// the queue's AF_XDP pool registered so the next bind fails `EBUSY`.
 pub struct XdpAttachment<'a> {
@@ -688,7 +688,7 @@ impl TcpPlane {
     /// Short by design: a shut window or a peer that stopped reading ends the
     /// loop instead of spinning in it, so the caller keeps control and can
     /// check for a signal, drain RX, or give up. `Ok(0)` means the socket took
-    /// nothing — either its buffer is full or the send half is closed.
+    /// nothing - either its buffer is full or the send half is closed.
     fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut sent = 0;
         while sent < buf.len() {
@@ -743,7 +743,7 @@ struct UdpPlane {
 
 impl UdpPlane {
     /// Returns the payload bytes accepted, like `sendto`: a full TX pool drops
-    /// the datagram on the floor but still reports it sent — UDP is lossy by
+    /// the datagram on the floor but still reports it sent - UDP is lossy by
     /// contract, and a drop here is indistinguishable from a drop on the wire.
     fn send(&mut self, payload: &[u8]) -> io::Result<usize> {
         if self.framing.remote.is_none() {
@@ -1520,7 +1520,7 @@ mod tests {
     }
 
     /// The key has to match `struct flow` in the BPF program byte for byte.
-    /// Get the order or endianness wrong and nothing errors — the lookup just
+    /// Get the order or endianness wrong and nothing errors - the lookup just
     /// never matches and no packet is ever redirected.
     #[test]
     fn flow_key_matches_the_bpf_struct_layout() {

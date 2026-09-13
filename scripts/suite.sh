@@ -20,7 +20,7 @@ throughput) DEF_COUNT=100000 DEF_SIZES=1024 ;;
 # IP-fragmented, which this stack drops by design.
 latency) DEF_COUNT=20000 DEF_SIZES="64 512 1472" ;;
 # Long enough to collect real samples, not a 150 ms blip.
-profile) DEF_COUNT=4000000 DEF_SIZES=1024 P_STACK=${2:-speedy} P_PROTO=${3:-tcp} ;;
+profile) DEF_COUNT=4000000 DEF_SIZES=1024 P_STACK=${2:-xskip} P_PROTO=${3:-tcp} ;;
 *) sed -n '2,9p' "$0" >&2; exit 1 ;;
 esac
 
@@ -119,8 +119,8 @@ run_case() {
     [[ $MODE == latency ]] && mode_args=(--mode echo)
     # Demand zero-copy rather than accepting Auto's fallback: a guest that
     # regressed on VIRTIO_F_ACCESS_PLATFORM would otherwise post a full set of
-    # "speedy" rows quietly measured in copy mode. Override with XDP_MODE=auto.
-    [[ $stack == speedy ]] && mode_args+=(--xdp-mode "${XDP_MODE:-zerocopy}")
+    # "xskip" rows quietly measured in copy mode. Override with XDP_MODE=auto.
+    [[ $stack == xskip ]] && mode_args+=(--xdp-mode "${XDP_MODE:-zerocopy}")
     # A wedged guest should cost a minute, not the whole session.
     out=$(timeout "${RUN_TIMEOUT:-120}" $SSH sudo "$BENCH" \
         --stack "$stack" --proto "$proto" "${mode_args[@]}" \
@@ -206,7 +206,7 @@ if [[ $MODE == profile ]]; then
 fi
 
 for size in $SIZES; do
-    for stack in kernel speedy; do
+    for stack in kernel xskip; do
         run_case "$stack" udp "$UDP_PORT" "$size"
         run_case "$stack" tcp "$TCP_PORT" "$size"
     done
@@ -217,7 +217,7 @@ if [[ $MODE == throughput ]]; then
     # constant, and the only one that looks at the bytes rather than counting
     # them. 4000 over a 1500 MTU is 1472 + 1472 + 1056.
     echo
-    echo "== speedy/udp chunking, one $CHUNK_SIZE byte send"
+    echo "== xskip/udp chunking, one $CHUNK_SIZE byte send"
     mark=$(wc -l < "$PEER_LOG")
     mtu=$($SSH cat "/sys/class/net/$GUEST_IF/mtu" | tr -d '\r')
     payload=$((mtu - 28))
@@ -228,7 +228,7 @@ if [[ $MODE == throughput ]]; then
         want="$want $n"
         left=$((left - n))
     done
-    timeout "${RUN_TIMEOUT:-120}" $SSH sudo "$BENCH" --stack speedy --proto udp \
+    timeout "${RUN_TIMEOUT:-120}" $SSH sudo "$BENCH" --stack xskip --proto udp \
         --mode chunk --xdp-mode "${XDP_MODE:-zerocopy}" \
         --if "$GUEST_IF" --local-ip "$GUEST_IP" --peer-ip "$PEER_IP" \
         --port "$UDP_PORT" --peer-mac "$PEER_MAC" --cpu "$CPU" --queue "$QUEUE" \

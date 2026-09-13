@@ -1,4 +1,4 @@
-//! Throughput bench: the same consume loop over an AF_XDP `SpeedySocket` or a
+//! Throughput bench: the same consume loop over an AF_XDP `Socket` or a
 //! plain kernel socket, so the two are timed the same way.
 //!
 //! Sends one `RUSTSSI <count> <size>\n` control message to the peer, then eats
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use xskip::speedy::{
-    self, Config, HugePage, Protocol, Sent, SpeedySocket, XdpMode, CONNECT_TIMEOUT,
+use xskip::socket::{
+    self, Config, HugePage, Protocol, Sent, Socket, XdpMode, CONNECT_TIMEOUT,
 };
 
 /// Heap profiling lives behind `--features dhat`: it swaps the global
@@ -27,7 +27,7 @@ use xskip::speedy::{
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
-const USAGE: &str = "usage: xskip-bench --stack <kernel|speedy> --proto <udp|tcp> \
+const USAGE: &str = "usage: xskip-bench --stack <kernel|xskip> --proto <udp|tcp> \
 --if <NAME> --local-ip <IPV4> --peer-ip <IPV4> --port <N> --peer-mac <MAC> --cpu <N> \
 --queue <N> --count <N> --size <N> [--xdp-mode <copy|zerocopy|auto>] [--mode <consume|echo>]\n\
 (--if, --peer-mac, --queue, --xdp-mode are ignored by the kernel stack;\n\
@@ -58,7 +58,7 @@ const RCVBUF: libc::c_int = 16 << 20;
 enum Sock<'obj> {
     Udp(UdpSocket),
     Tcp(TcpStream),
-    Speedy(Box<SpeedySocket<'obj>>),
+    Xskip(Box<Socket<'obj>>),
 }
 
 impl Sock<'_> {
@@ -66,7 +66,7 @@ impl Sock<'_> {
         match self {
             Sock::Udp(s) => s.send(buf).map(drop),
             Sock::Tcp(s) => s.write_all(buf),
-            Sock::Speedy(s) => {
+            Sock::Xskip(s) => {
                 let mut off = 0;
                 while off < buf.len() {
                     let Sent(n) = s.send(&buf[off..])?;
@@ -78,12 +78,12 @@ impl Sock<'_> {
     }
 
     /// `Ok(None)` means nothing arrived: the kernel sockets get there via their
-    /// read timeout, the speedy socket by polling an empty ring.
+    /// read timeout, the xskip socket by polling an empty ring.
     fn recv(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
         let r = match self {
             Sock::Udp(s) => s.recv(buf),
             Sock::Tcp(s) => s.read(buf),
-            Sock::Speedy(s) => return Ok(s.recv(buf)),
+            Sock::Xskip(s) => return Ok(s.recv(buf)),
         };
         match r {
             Ok(n) => Ok(Some(n)),
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
     let local_ip: Ipv4Addr = parse(&args, "local-ip")?;
     let peer_ip: Ipv4Addr = parse(&args, "peer-ip")?;
     let port: u16 = parse(&args, "port")?;
-    let peer_mac = speedy::parse_mac(arg(&args, "peer-mac")?).map_err(anyhow::Error::msg)?;
+    let peer_mac = socket::parse_mac(arg(&args, "peer-mac")?).map_err(anyhow::Error::msg)?;
     let cpu: usize = parse(&args, "cpu")?;
     let queue: u32 = parse(&args, "queue")?;
     let count: u64 = parse(&args, "count")?;
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
     }
 
     // Same pinning for both stacks, or the comparison is not one.
-    speedy::pin_cpu(cpu);
+    socket::pin_cpu(cpu);
 
     let peer = SocketAddrV4::new(peer_ip, port);
 
@@ -153,14 +153,14 @@ fn main() -> Result<()> {
                 Sock::Tcp(s)
             }
         },
-        "speedy" => {
-            let ifindex = speedy::ifindex(&ifname).with_context(|| format!("interface {ifname}"))?;
-            let our_mac = speedy::read_mac(&ifname).with_context(|| format!("MAC of {ifname}"))?;
-            let mtu = speedy::read_mtu(&ifname).with_context(|| format!("MTU of {ifname}"))?;
-            skel = speedy::load_skel(&mut obj).context("load bpf skeleton")?;
-            _xdp = speedy::attach_xdp(&skel, ifindex).context("attach xdp")?;
+        "xskip" => {
+            let ifindex = socket::ifindex(&ifname).with_context(|| format!("interface {ifname}"))?;
+            let our_mac = socket::read_mac(&ifname).with_context(|| format!("MAC of {ifname}"))?;
+            let mtu = socket::read_mtu(&ifname).with_context(|| format!("MTU of {ifname}"))?;
+            skel = socket::load_skel(&mut obj).context("load bpf skeleton")?;
+            _xdp = socket::attach_xdp(&skel, ifindex).context("attach xdp")?;
 
-            let mut s = SpeedySocket::new(
+            let mut s = Socket::new(
                 &skel,
                 proto,
                 Config {
@@ -174,7 +174,7 @@ fn main() -> Result<()> {
                     xdp_mode,
                 },
             )
-            .context("create speedy socket")?;
+            .context("create xskip socket")?;
 
             s.connect(peer).context("connect")?;
             let deadline = Instant::now() + CONNECT_TIMEOUT;
@@ -184,7 +184,7 @@ fn main() -> Result<()> {
                 }
                 std::hint::spin_loop();
             }
-            Sock::Speedy(Box::new(s))
+            Sock::Xskip(Box::new(s))
         }
         other => bail!("unknown stack {other:?}\n{USAGE}"),
     };
@@ -230,7 +230,7 @@ fn main() -> Result<()> {
     let mut bytes = 0u64;
     let mut spins = 0u64;
     // Kernel sockets wait inside recv; the AF_XDP one returns immediately.
-    let blocking = !matches!(sock, Sock::Speedy(_));
+    let blocking = !matches!(sock, Sock::Xskip(_));
 
     loop {
         let done = match proto {
@@ -279,7 +279,7 @@ fn main() -> Result<()> {
 
     // The loop exits either on the target count or on the idle cutoff. `last`
     // is only sampled every 64 messages, so use it for the idle exit and the
-    // clock for the complete one, or elapsed is short by up to 63 receives —
+    // clock for the complete one, or elapsed is short by up to 63 receives -
     // and by a different amount per stack, since a kernel read returns more
     // bytes per call than smoltcp's.
     let end = if msgs >= count || bytes >= want_bytes {

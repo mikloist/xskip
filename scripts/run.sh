@@ -79,7 +79,7 @@ pkill -f bench_peer.py 2>/dev/null
 sleep 0.3
 
 rc=0
-say "throughput: kernel vs speedy, udp and tcp"
+say "throughput: kernel vs xskip, udp and tcp"
 COUNT=$COUNT "$HERE/suite.sh" throughput || rc=1
 
 pkill -f bench_peer.py 2>/dev/null
@@ -89,7 +89,7 @@ say "latency: round trip over a size sweep, guest echoes"
 COUNT=$LAT_COUNT "$HERE/suite.sh" latency || rc=1
 
 if [[ $FLAME == yes ]]; then
-    for combo in "speedy tcp" "kernel tcp" "speedy udp" "kernel udp"; do
+    for combo in "xskip tcp" "kernel tcp" "xskip udp" "kernel udp"; do
         pkill -f bench_peer.py 2>/dev/null
         sleep 0.3
         say "profiling $combo"
