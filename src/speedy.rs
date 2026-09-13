@@ -453,9 +453,7 @@ pub fn load_skel(obj: &mut MaybeUninit<OpenObject>) -> io::Result<RustssiSkel<'_
 pub struct XdpAttachment<'a> {
     skel: &'a RustssiSkel<'a>,
     ifindex: u32,
-    /// `XdpFlags` is neither `Copy` nor `Clone`, so keep the bits and rebuild
-    /// the flags when detaching.
-    flags: u32,
+    native: bool,
 }
 
 /// Native (driver) XDP first, generic second.
@@ -467,18 +465,22 @@ pub struct XdpAttachment<'a> {
 pub fn attach_xdp<'a>(skel: &'a RustssiSkel<'a>, ifindex: u32) -> io::Result<XdpAttachment<'a>> {
     let xdp = Xdp::new(skel.progs.xdp_redirect_flow.as_fd());
     let mut last = io::Error::from(io::ErrorKind::InvalidInput);
-    for (mode, flags) in [
-        ("native", XdpFlags::DRV_MODE),
-        ("generic", XdpFlags::SKB_MODE),
-    ] {
-        let bits = flags.bits();
+    for native in [true, false] {
+        let flags = if native {
+            XdpFlags::DRV_MODE
+        } else {
+            XdpFlags::SKB_MODE
+        };
         match xdp.attach(ifindex as i32, flags) {
             Ok(()) => {
-                eprintln!("-- XDP attached in {mode} mode --");
+                eprintln!(
+                    "-- XDP attached in {} mode --",
+                    if native { "native" } else { "generic" }
+                );
                 return Ok(XdpAttachment {
                     skel,
                     ifindex,
-                    flags: bits,
+                    native,
                 });
             }
             Err(e) => last = io::Error::other(format!("attach xdp program: {e}")),
@@ -490,7 +492,12 @@ pub fn attach_xdp<'a>(skel: &'a RustssiSkel<'a>, ifindex: u32) -> io::Result<Xdp
 impl Drop for XdpAttachment<'_> {
     fn drop(&mut self) {
         let xdp = Xdp::new(self.skel.progs.xdp_redirect_flow.as_fd());
-        let _ = xdp.detach(self.ifindex as i32, XdpFlags::from_bits_truncate(self.flags));
+        let flags = if self.native {
+            XdpFlags::DRV_MODE
+        } else {
+            XdpFlags::SKB_MODE
+        };
+        let _ = xdp.detach(self.ifindex as i32, flags);
     }
 }
 
