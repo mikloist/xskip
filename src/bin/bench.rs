@@ -204,14 +204,31 @@ fn main() -> Result<()> {
         other => bail!("unknown stack {other:?}\n{USAGE}"),
     };
 
+    let mode = args.get("mode").map(String::as_str).unwrap_or("consume");
     // `--mode echo` turns this into the far end of a ping-pong: every message
     // goes straight back. The peer holds both timestamps, so no clock has to
     // agree with any other clock.
-    let echo = args.get("mode").map(String::as_str).unwrap_or("consume") == "echo";
+    let echo = mode == "echo";
     let want_bytes = count * size as u64;
-    let verb = if echo { "ECHO " } else { "" };
+    let verb = match mode {
+        "echo" => "ECHO ",
+        "chunk" => "CHUNK ",
+        _ => "",
+    };
     sock.send_all(format!("RUSTSSI {verb}{count} {size}\n").as_bytes())
         .context("send control message")?;
+
+    // `--mode chunk` sends one oversized buffer and stops. UDP has to split it
+    // at the interface MTU, and the peer reports the datagram sizes it saw, so
+    // this is the only check that `send` chunks by the link rather than by a
+    // constant. The pattern is checked there too: counting bytes proves
+    // nothing about their contents.
+    if mode == "chunk" {
+        let payload: Vec<u8> = (0..size).map(|i| i as u8).collect();
+        sock.send_all(&payload).context("chunk send")?;
+        println!("{{\"stack\":\"{stack}\",\"proto\":\"{proto_name}\",\"sent\":{size}}}");
+        return Ok(());
+    }
 
     let mut buf = vec![0u8; 65536];
 
@@ -225,6 +242,8 @@ fn main() -> Result<()> {
     let mut msgs = 0u64;
     let mut bytes = 0u64;
     let mut spins = 0u64;
+    // Kernel sockets wait inside recv; the AF_XDP one returns immediately.
+    let blocking = !matches!(sock, Sock::Speedy(_));
 
     loop {
         let done = match proto {
@@ -252,20 +271,32 @@ fn main() -> Result<()> {
             None => {
                 // An empty ring is the common case in a busy-poll loop, so
                 // timing every one of them costs more than the receive path.
+                // A blocking socket already spent IDLE inside recv, though, and
+                // batching there would defer the cutoff by 1024 * IDLE.
                 spins += 1;
-                if spins & 1023 == 0 && last.elapsed() > IDLE {
+                if (blocking || spins & 1023 == 0) && last.elapsed() > IDLE {
                     break;
                 }
             }
         }
     }
+    // The loop exits either on the target count or on the idle cutoff. `last`
+    // is only sampled every 64 messages, so use it for the idle exit and the
+    // clock for the complete one, or elapsed is short by up to 63 receives —
+    // and by a different amount per stack, since a kernel read returns more
+    // bytes per call than smoltcp's.
+    let end = if msgs >= count || bytes >= want_bytes {
+        Instant::now()
+    } else {
+        last
+    };
 
     // A TCP read is an arbitrary slice of the stream, not a message.
     let received = match proto {
         Protocol::Udp => msgs,
         Protocol::Tcp => bytes / size as u64,
     };
-    let elapsed = (last - start).as_secs_f64();
+    let elapsed = (end - start).as_secs_f64();
     let cpu = cpu_secs() - cpu0;
     let rate = |v: f64| if elapsed > 0.0 { v / elapsed } else { 0.0 };
     let loss = (count.saturating_sub(received)) as f64 * 100.0 / count as f64;

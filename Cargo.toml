@@ -20,7 +20,7 @@ smoltcp = { version = "0.12", default-features = false, features = [
 
 # Symbols in release: a stripped -O2 binary profiles as one opaque frame, and
 # reading the flamegraph is the point. Frame pointers come from RUSTFLAGS in
-# scripts/flame.sh, there is no profile key for them.
+# scripts/run.sh, there is no profile key for them.
 [profile.release]
 debug = 1
 

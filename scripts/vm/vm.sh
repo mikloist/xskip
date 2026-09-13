@@ -143,6 +143,9 @@ write_files:
           err = ctypes.get_errno()
           sys.exit("%s queue %d: XDP_ZEROCOPY bind FAILED: %s" % (ifname, queue, os.strerror(err)))
       print("%s queue %d: XDP_ZEROCOPY bind ok" % (ifname, queue))
+# ethtool for the channel count the suite must set, perf for profile mode.
+# Both come from the NAT'd eth0 on first boot, before any benchmark runs.
+packages: [ethtool, perf]
 runcmd:
   # Quoted: an unquoted YAML flow item would split the arg string on its commas.
   - ["grubby", "--update-kernel=ALL", "--args=$ISOL"]

@@ -9,7 +9,9 @@
 # Idempotent: an already-running VM is reused, and the image is fetched only
 # the first time. Everything below runs through scripts/suite.sh, which is
 # called with the ssh command this script derives, so it needs no configuring.
-set -u
+# pipefail: `cargo build | tail` otherwise reports tail's status, so a failed
+# build would deploy and benchmark whatever binary was lying around.
+set -u -o pipefail
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/.." && pwd)

@@ -25,12 +25,33 @@ def log(msg):
 
 
 def parse_control(line):
+    """-> (count, size, mode) where mode is "blast", "echo" or "chunk"."""
     f = line.split()
-    if len(f) == 4 and f[0] == b"RUSTSSI" and f[1] == b"ECHO":
-        return int(f[2]), int(f[3]), True
+    if len(f) == 4 and f[0] == b"RUSTSSI" and f[1] in (b"ECHO", b"CHUNK"):
+        return int(f[2]), int(f[3]), f[1].decode().lower()
     if len(f) == 3 and f[0] == b"RUSTSSI":
-        return int(f[1]), int(f[2]), False
+        return int(f[1]), int(f[2]), "blast"
     raise ValueError(f"bad control message {line!r}")
+
+
+def collect_chunks(s, peer, size):
+    """Report the datagram sizes one oversized send arrived as, and whether
+    the bytes survived. A count of bytes proves nothing about their order."""
+    s.settimeout(2.0)
+    sizes, got = [], b""
+    try:
+        while len(got) < size:
+            data, src = s.recvfrom(65535)
+            if src != peer:
+                continue
+            sizes.append(len(data))
+            got += data
+    except (OSError, socket.timeout):
+        pass
+    s.settimeout(None)
+    want = bytes((i & 0xFF) for i in range(size))
+    log(f"udp chunks {' '.join(str(n) for n in sizes)}"
+        f" intact={got == want}")
 
 
 def report(proto, count, size, sent, elapsed):
@@ -79,13 +100,16 @@ def udp_blast(addr, port):
     while True:
         line, peer = s.recvfrom(65535)
         try:
-            count, size, echo = parse_control(line)
+            count, size, mode = parse_control(line)
         except ValueError as e:
             log(f"udp {e}")
             continue
-        log(f"udp run {count} x {size} for {peer}{' (rtt)' if echo else ''}")
-        if echo:
+        log(f"udp run {count} x {size} for {peer} ({mode})")
+        if mode == "echo":
             udp_pingpong(s, peer, count, size)
+            continue
+        if mode == "chunk":
+            collect_chunks(s, peer, size)
             continue
         payload = bytes(size)
         sent = 0
@@ -144,12 +168,12 @@ def tcp_blast(addr, port):
                     if not data:
                         break
                     line += data
-                count, size, echo = parse_control(line)
+                count, size, mode = parse_control(line)
             except (ValueError, OSError) as e:
                 log(f"tcp {e}")
                 continue
-            log(f"tcp run {count} x {size} for {peer}{' (rtt)' if echo else ''}")
-            if echo:
+            log(f"tcp run {count} x {size} for {peer} ({mode})")
+            if mode == "echo":
                 tcp_pingpong(conn, count, size)
                 continue
             total = count * size

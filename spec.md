@@ -36,7 +36,8 @@ straight from smoltcp's receive buffer into the caller's slice via
 ## Data plane
 
 The eBPF program is written in C and loaded from Rust through libbpf-rs. It
-attaches in generic (SKB) XDP mode.
+attaches in native (driver) XDP mode, falling back to generic only on a driver
+without it — a generic attachment cannot feed a zero-copy socket.
 
 A BPF hash map holds the flows we own, keyed on the full 4-tuple: remote
 address, remote port, local address, local port, packed and in network order.
@@ -64,12 +65,12 @@ The AF_XDP socket binds with `XDP_USE_NEED_WAKEUP`, and the consumer's loop
 spins the RX ring directly, kicking the driver with `recvfrom`/`sendto` only
 when a ring raises the need-wakeup flag. (`SO_PREFER_BUSY_POLL` is not set; the
 loop already never sleeps, so there is nothing yet for it to buy.) The bind
-mode is the only thing that differs between dev and production: on veth we bind
-`XDP_COPY` (veth has no AF_XDP zero-copy path, so the kernel copies each frame
-into UMEM), and on a zero-copy-capable NIC we bind `XDP_ZEROCOPY` and the NIC
-DMAs straight into UMEM. The userspace code — UMEM, rings, XSKMAP, smoltcp — is
-identical either way, so the veth harness proves correctness while real
-hardware delivers the zero-copy ingress the project is named for.
+mode is the only thing that differs between environments: `XdpMode::Copy` works
+anywhere and `XdpMode::ZeroCopy` needs a driver with `ndo_xsk_wakeup`, which
+veth does not have and virtio-net does. `Auto` asks for zero-copy and falls
+back. The userspace code — UMEM, rings, XSKMAP, smoltcp — is identical either
+way; the benchmark guest binds zero-copy and the suite demands it explicitly,
+so a silent downgrade fails the run instead of quietly halving the result.
 
 UMEM layout, one dedicated region per socket:
 
@@ -106,7 +107,7 @@ sock.connect(SocketAddrV4::new(peer_ip, port))?;
 while !sock.poll_connect()? {}
 
 let Sent(n) = sock.send(b"...")?;
-let n = sock.recv(&mut buf)?; // WouldBlock until something arrives
+let n = sock.recv(&mut buf); // Option: None until something arrives
 ```
 
 `new` builds the UMEM and rings, binds, and registers the socket fd in
