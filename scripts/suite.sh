@@ -128,6 +128,10 @@ run_case() {
         --port "$port" --peer-mac "$PEER_MAC" --cpu "$CPU" --queue "$QUEUE" \
         --count "$COUNT" --size "$size" 2>"$ERR_LOG")
     sed 's/^/   /' "$ERR_LOG"
+    # dhat writes dhat-heap.json into the guest's home on every run, so name it
+    # before the next case overwrites it. scripts/run.sh copies them back.
+    [[ ${DHAT:-no} == yes ]] &&
+        $SSH "sudo mv -f ~/dhat-heap.json ~/dhat-$stack-$proto.json" 2>/dev/null
 
     if [[ $MODE == throughput ]]; then
         if [[ $out != \{* ]]; then

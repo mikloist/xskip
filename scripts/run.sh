@@ -109,8 +109,14 @@ if [[ $ALLOC == yes ]]; then
         -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
         "$ROOT/target/release/rustssi-bench" \
         fedora@localhost:/home/fedora/rustssi-bench-dhat || die "dhat deploy failed"
-    COUNT=$ALLOC_COUNT BENCH=/home/fedora/rustssi-bench-dhat \
+    DHAT=yes COUNT=$ALLOC_COUNT BENCH=/home/fedora/rustssi-bench-dhat \
         "$HERE/suite.sh" throughput || rc=1
+    # The profiles are written in the guest; bring them here to look at.
+    $SSH sudo chown fedora: '~/dhat-*.json' 2>/dev/null
+    scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        'fedora@localhost:/home/fedora/dhat-*.json' "$ROOT/" 2>/dev/null &&
+        $SSH 'rm -f ~/dhat-*.json'
     # Leave the plain binary in place for the next run.
     RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release \
         --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
@@ -120,6 +126,10 @@ pkill -f bench_peer.py 2>/dev/null
 
 say "done"
 [[ $FLAME == yes ]] && ls -1 "$ROOT"/flame-*.svg 2>/dev/null
+if [[ $ALLOC == yes ]] && ls "$ROOT"/dhat-*.json >/dev/null 2>&1; then
+    ls -1 "$ROOT"/dhat-*.json
+    echo "view at https://nnethercote.github.io/dh_view/dh_view.html (load the json)"
+fi
 [[ $DOWN == yes ]] && echo "vm will be stopped"
 echo "ssh: $VM ssh"
 exit $rc

@@ -38,7 +38,10 @@ HOST_CPUS=${VM_HOST_CPUS:-8-11}
 MEM=4096
 SSH_PORT=${VM_SSH_PORT:-2222}
 # Guest cores 2,3 are isolated for the pinned busy-poll benchmark thread.
-ISOL="isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 net.ifnames=0"
+# hugepages=64 reserves 128 MiB of 2 MiB pages at boot, when memory is still
+# unfragmented: the UMEM is 8 MiB and wants four of them, and a pool grown
+# later with sysctl often cannot find contiguous memory.
+ISOL="isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 net.ifnames=0 hugepages=64"
 
 BASE=$CACHE/$IMG
 KEY=$CACHE/id_ed25519
