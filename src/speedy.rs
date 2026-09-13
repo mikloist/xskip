@@ -30,8 +30,6 @@
 //! entirely and writes Ethernet/IPv4/UDP straight into a UMEM frame, using
 //! `smoltcp::wire` only to emit and parse headers.
 
-#![allow(non_camel_case_types)]
-
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::io;
@@ -51,7 +49,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpProtocol, Ipv4Packet, Ipv4Repr, UdpPacket,
-    UdpRepr, UDP_HEADER_LEN,
+    UdpRepr, IPV4_HEADER_LEN, UDP_HEADER_LEN,
 };
 
 pub mod skel {
@@ -59,30 +57,15 @@ pub mod skel {
 }
 use skel::*;
 
-const AF_XDP: libc::c_int = 44;
-const SOL_XDP: libc::c_int = 283;
-
-// setsockopt / getsockopt names (SOL_XDP)
-const XDP_MMAP_OFFSETS: libc::c_int = 1;
-const XDP_RX_RING: libc::c_int = 2;
-const XDP_TX_RING: libc::c_int = 3;
-const XDP_UMEM_REG: libc::c_int = 4;
-const XDP_UMEM_FILL_RING: libc::c_int = 5;
-const XDP_UMEM_COMPLETION_RING: libc::c_int = 6;
-
-// mmap() page offsets identifying each ring.
-const XDP_PGOFF_RX_RING: libc::off_t = 0;
-const XDP_PGOFF_TX_RING: libc::off_t = 0x8000_0000;
-const XDP_UMEM_PGOFF_FILL_RING: libc::off_t = 0x1_0000_0000;
-const XDP_UMEM_PGOFF_COMPLETION_RING: libc::off_t = 0x1_8000_0000;
-
-// bind() sxdp_flags
-const XDP_COPY: u16 = 1 << 1;
-const XDP_ZEROCOPY: u16 = 1 << 2;
-const XDP_USE_NEED_WAKEUP: u16 = 1 << 3;
-
-// ring flags field
-const XDP_RING_NEED_WAKEUP: u32 = 1 << 0;
+// Everything the AF_XDP UAPI defines comes from libc; only the numbers this
+// stack chooses for itself live here.
+use libc::{
+    sockaddr_xdp, xdp_desc, xdp_mmap_offsets, xdp_ring_offset, xdp_umem_reg, AF_XDP, SOL_XDP,
+    XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING, XDP_RING_NEED_WAKEUP,
+    XDP_RX_RING, XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING,
+    XDP_UMEM_PGOFF_COMPLETION_RING, XDP_UMEM_PGOFF_FILL_RING, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP,
+    XDP_ZEROCOPY,
+};
 
 /// Frames are sized from the interface MTU by [`frame_size_for`]; this is how
 /// many of them the UMEM holds, so the UMEM itself scales with the link.
@@ -91,10 +74,12 @@ const FILL_SIZE: u32 = 2048;
 const RX_SIZE: u32 = 2048;
 const TX_SIZE: u32 = 2048;
 
-/// Ethernet header length we prepend/strip for the IP-medium device.
+/// Ethernet header we prepend/strip ourselves. smoltcp runs at `Medium::Ip`
+/// and only defines this behind `medium-ethernet`, which would pull in a
+/// link layer we do not use.
 const ETH_HDR_LEN: usize = 14;
-/// IPv4 (20) + UDP (8).
-const UDP_OVERHEAD: usize = 28;
+/// What a UDP datagram costs on the wire beyond its payload.
+const UDP_OVERHEAD: usize = IPV4_HEADER_LEN + UDP_HEADER_LEN;
 /// `XDP_UMEM_MIN_CHUNK_SIZE`: the kernel refuses a smaller UMEM chunk.
 const MIN_CHUNK_SIZE: usize = 2048;
 
@@ -874,51 +859,6 @@ impl Framing {
 // Raw AF_XDP: UMEM + the four rings
 // ---------------------------------------------------------------------------
 
-#[repr(C)]
-struct xdp_umem_reg {
-    addr: u64,
-    len: u64,
-    chunk_size: u32,
-    headroom: u32,
-    flags: u32,
-    tx_metadata_len: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct xdp_ring_offset {
-    producer: u64,
-    consumer: u64,
-    desc: u64,
-    flags: u64,
-}
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct xdp_mmap_offsets {
-    rx: xdp_ring_offset,
-    tx: xdp_ring_offset,
-    fr: xdp_ring_offset,
-    cr: xdp_ring_offset,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct xdp_desc {
-    addr: u64,
-    len: u32,
-    options: u32,
-}
-
-#[repr(C)]
-struct sockaddr_xdp {
-    sxdp_family: u16,
-    sxdp_flags: u16,
-    sxdp_ifindex: u32,
-    sxdp_queue_id: u32,
-    sxdp_shared_umem_fd: u32,
-}
-
 /// A single producer/consumer ring mapped out of the kernel.
 struct Ring {
     producer: *mut u32,
@@ -1050,7 +990,8 @@ impl Xsk {
             setsockopt(fd, XDP_RX_RING, &RX_SIZE)?;
             setsockopt(fd, XDP_TX_RING, &TX_SIZE)?;
 
-            let mut off = xdp_mmap_offsets::default();
+            // libc's UAPI structs are plain repr(C) with no Default.
+            let mut off = std::mem::zeroed::<xdp_mmap_offsets>();
             let mut len = std::mem::size_of::<xdp_mmap_offsets>() as libc::socklen_t;
             if libc::getsockopt(
                 fd,
@@ -1070,14 +1011,14 @@ impl Xsk {
                 &off.fr,
                 FILL_SIZE,
                 std::mem::size_of::<u64>(),
-                XDP_UMEM_PGOFF_FILL_RING,
+                XDP_UMEM_PGOFF_FILL_RING as libc::off_t,
             )?;
             let comp = Ring::map(
                 fd,
                 &off.cr,
                 TX_SIZE,
                 std::mem::size_of::<u64>(),
-                XDP_UMEM_PGOFF_COMPLETION_RING,
+                XDP_UMEM_PGOFF_COMPLETION_RING as libc::off_t,
             )?;
             let rx = Ring::map(
                 fd,
