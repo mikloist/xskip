@@ -13,8 +13,8 @@
 #
 # virbr0 is an isolated libvirt network this script defines and starts over
 # qemu:///system, so no root is needed for it. The multiqueue tap plugged into
-# it is the one thing root has to create, once per host boot; `up` prints the
-# command when it is missing.
+# it is the one thing root has to create; `up` prints the command when it is
+# missing. `down` removes both again, the tap only if sudo needs no password.
 set -u
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -331,9 +331,21 @@ cmd_down() {
 		for _ in {1..20}; do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
 		kill -9 "$p" 2>/dev/null
 	fi
-	# The libvirt network autostarts and the tap is reusable, so both stay;
-	# deleting the tap would need root again.
 	rm -f "$OVERLAY" "$PIDFILE" "$QMP" "$SEED"
+	# Undefine, not just destroy: net-autostart would otherwise bring the
+	# bridge back at the next host boot. Removing the bridge takes the tap
+	# enslaved to it along, so the tap is only dealt with afterwards.
+	if have virsh && virsh $VIRSH net-info "$LIBVIRT_NET" >/dev/null 2>&1; then
+		virsh $VIRSH net-destroy "$LIBVIRT_NET" >/dev/null 2>&1
+		virsh $VIRSH net-undefine "$LIBVIRT_NET" >/dev/null 2>&1
+	fi
+	# Whatever survived is root's: -n rather than a prompt, because this also
+	# runs from run.sh --down, where a password prompt would hang the exit.
+	if [[ -d /sys/class/net/$TAP ]]; then
+		sudo -n ip link delete "$TAP" 2>/dev/null
+		[[ -d /sys/class/net/$TAP ]] &&
+			echo "vm: $TAP needs root to remove: sudo ip link delete $TAP"
+	fi
 	echo "vm: down"
 }
 

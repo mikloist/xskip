@@ -5,7 +5,7 @@
 #   ./scripts/run.sh --quick         smaller counts, no flamegraphs
 #   ./scripts/run.sh --no-flame      benchmarks only
 #   ./scripts/run.sh --no-alloc      skip the dhat allocation pass
-#   ./scripts/run.sh --down          tear the VM down afterwards
+#   ./scripts/run.sh --down          tear the VM and its host network down after
 #
 # Idempotent: an already-running VM is reused, and the image is fetched only
 # the first time. Everything below runs through scripts/suite.sh, which is
@@ -45,7 +45,9 @@ done
 say() { printf '\n=== %s\n' "$*"; }
 die() { echo "run: $*" >&2; exit 1; }
 
-trap '[[ $DOWN == yes ]] && "$VM" down >/dev/null 2>&1' EXIT
+# Not silenced: teardown that fails (a tap only root can remove, for one)
+# has to say so, or the VM is left running with nothing on screen.
+trap '[[ $DOWN == yes ]] && "$VM" down' EXIT
 
 # 1. Binary first: no point booting a VM for code that does not compile.
 #    Frame pointers so the flamegraph has an interior; -g needs them.
@@ -130,6 +132,5 @@ if [[ $ALLOC == yes ]] && ls "$ROOT"/dhat-*.json >/dev/null 2>&1; then
     ls -1 "$ROOT"/dhat-*.json
     echo "view at https://nnethercote.github.io/dh_view/dh_view.html (load the json)"
 fi
-[[ $DOWN == yes ]] && echo "vm will be stopped"
 echo "ssh: $VM ssh"
 exit $rc
