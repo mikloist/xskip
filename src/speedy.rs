@@ -717,11 +717,13 @@ impl TcpPlane {
     fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut sent = 0;
         while sent < buf.len() {
-            self.poll();
             let s = self.sockets.get_mut::<tcp::Socket>(self.handle);
             if !s.may_send() {
                 break;
             }
+            // Copies whatever the send buffer has room for. A short copy means
+            // it is full, and only an ACK can free it, so looping here without
+            // polling would spin: break and let the caller come back.
             match s.send_slice(&buf[sent..]) {
                 Ok(0) => break,
                 Ok(n) => sent += n,
