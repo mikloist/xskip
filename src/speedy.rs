@@ -112,20 +112,10 @@ fn frame_size_for(mtu: usize, page_size: usize) -> io::Result<u32> {
     Ok(size as u32)
 }
 
-/// Bytes handed to the wire by [`SpeedySocket::send`].
-///
-/// A newtype purely so it is `#[must_use]`: TCP writes are short when the
-/// window is shut, so a caller that drops the count silently loses the tail of
-/// a large buffer. `#[must_use]` on the function itself would not catch it —
-/// `sock.send(buf)?;` consumes the `Result` and discards the count without a
-/// warning; a must-use *type* warns there.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sent(pub usize);
 
-/// TX computes checksums so the peer accepts our packets; RX never verifies,
-/// because over veth the kernel offloads TX checksums and inbound frames
-/// captured via AF_XDP carry uncomputed/partial L3+L4 checksums.
 fn checksum_caps() -> ChecksumCapabilities {
     let mut c = ChecksumCapabilities::default();
     c.ipv4 = Checksum::Tx;
@@ -259,8 +249,6 @@ impl<'obj> SpeedySocket<'obj> {
         // entry here and falls through to the kernel, with nothing logged
         // anywhere. On a multi-queue NIC the receiver must cut the device to one
         // channel, or the flow is steered by hash and arrives roughly never.
-        // ponytail: single queue. One socket per ring, indexed by rx_queue_index,
-        // is the fix when a single core stops keeping up.
         skel.maps
             .xsks_map
             .update(
@@ -359,6 +347,9 @@ impl<'obj> SpeedySocket<'obj> {
                 for chunk in buf.chunks(max_payload) {
                     u.send(chunk)?;
                 }
+                // One syscall for the whole buffer, however many datagrams it
+                // became.
+                u.xsk.kick_tx();
                 Ok(Sent(buf.len()))
             }
             Plane::Tcp(t) => t.send(buf).map(Sent),
@@ -367,10 +358,6 @@ impl<'obj> SpeedySocket<'obj> {
 
     /// One pass over the rings. `None` means nothing had arrived, `Some(0)` is
     /// end of stream (TCP only; UDP has no FIN).
-    ///
-    /// Not a `Result`: an empty ring is the common case in a polling loop, and
-    /// building an `io::Error` for it was 3.5% of the profile. A socket that
-    /// was never connected also polls empty forever, so `connect` first.
     pub fn recv(&mut self, buf: &mut [u8]) -> Option<usize> {
         debug_assert!(self.connected, "recv before connect");
         if buf.is_empty() || !self.connected {
@@ -654,13 +641,6 @@ struct TcpPlane {
 }
 
 /// Polls served from one clock reading before taking another.
-///
-/// `Instant::now` goes through the vDSO and then `SystemTime` arithmetic; at
-/// busy-poll rates it was a third of this stack's CPU, more than the packet
-/// work. smoltcp only needs time for its timers, which are millisecond-scale,
-/// so a batch of polls can share one reading.
-// ponytail: fixed batch. The staleness ceiling is 32 polls, microseconds while
-// spinning; make it deadline-based if a timer ever fires visibly late.
 const CLOCK_TICKS: u32 = 32;
 
 impl TcpPlane {
@@ -719,8 +699,12 @@ impl TcpPlane {
 
     fn poll(&mut self) {
         let now = self.now();
+        // One poll can emit several segments through `TxToken`; they leave
+        // together on the kick below.
         self.iface.poll(now, &mut self.device, &mut self.sockets);
-        self.xsk.borrow_mut().kick_rx();
+        let mut xsk = self.xsk.borrow_mut();
+        xsk.kick_tx();
+        xsk.kick_rx();
     }
 
     /// Hand as much of `buf` to smoltcp's send buffer as it will take right
@@ -1019,6 +1003,10 @@ struct Xsk {
     rx: Ring,
     tx: Ring,
     tx_free: Vec<u64>,
+    /// Frames published to the TX ring that the driver has not been told
+    /// about. Without it a kick in the poll loop fires on every idle spin,
+    /// because `needs_wakeup` stays set whether or not we queued anything.
+    tx_pending: bool,
     huge: HugePage,
     bind_label: &'static str,
 }
@@ -1124,6 +1112,7 @@ impl Xsk {
                 rx,
                 tx,
                 tx_free,
+                tx_pending: false,
                 huge,
                 bind_label: "",
             };
@@ -1237,7 +1226,11 @@ impl Xsk {
         self.tx_free.pop()
     }
 
-    /// Queue a frame `[addr, addr+len)` on the TX ring and kick the driver.
+    /// Queue a frame `[addr, addr+len)` on the TX ring.
+    ///
+    /// Does not kick: AF_XDP transmits nothing until a syscall says so, but
+    /// one syscall covers every descriptor published so far, so the caller
+    /// kicks once at the end of a batch rather than once per frame.
     fn tx_submit(&mut self, addr: u64, len: u32) {
         let idx = (self.tx.cached & self.tx.mask) as usize;
         unsafe {
@@ -1248,10 +1241,17 @@ impl Xsk {
         }
         self.tx.cached = self.tx.cached.wrapping_add(1);
         self.tx.producer().store(self.tx.cached, Ordering::Release);
-        self.kick_tx();
+        self.tx_pending = true;
     }
 
+    /// Hand the queued frames to the driver. Mandatory after `tx_submit`:
+    /// nothing leaves the ring on its own. A no-op when nothing was queued,
+    /// which is most calls in a polling loop.
     fn kick_tx(&mut self) {
+        if !self.tx_pending {
+            return;
+        }
+        self.tx_pending = false;
         if self.tx.needs_wakeup() {
             unsafe {
                 libc::sendto(self.fd, ptr::null(), 0, libc::MSG_DONTWAIT, ptr::null(), 0);
