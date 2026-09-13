@@ -4,12 +4,14 @@
 //! Sends one `RUSTSSI <count> <size>\n` control message to the peer, then eats
 //! what the peer blasts back and prints one JSON line on stdout.
 
+#[cfg(not(feature = "dhat"))]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
+#[cfg(not(feature = "dhat"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -24,11 +26,18 @@ use rustssi::speedy::{
 /// A steady-state packet loop should allocate nothing at all; this is how we
 /// find out rather than assume. One relaxed add per allocation, which only
 /// costs anything if allocations happen, which is the thing being measured.
+///
+/// `--features dhat` swaps this for dhat's allocator, which answers the next
+/// question — *which* allocation — at the cost of recording a backtrace for
+/// each one.
+#[cfg(not(feature = "dhat"))]
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(feature = "dhat"))]
 struct Counting;
 
 // No `realloc`: the default one calls `alloc`, so growth is counted anyway.
+#[cfg(not(feature = "dhat"))]
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -39,8 +48,25 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+#[cfg(not(feature = "dhat"))]
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
+
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static ALLOCATOR: dhat::Alloc = dhat::Alloc;
+
+/// Allocations so far, from whichever allocator is in play.
+fn allocs_now() -> u64 {
+    #[cfg(not(feature = "dhat"))]
+    {
+        ALLOCS.load(Ordering::Relaxed)
+    }
+    #[cfg(feature = "dhat")]
+    {
+        dhat::HeapStats::get().total_blocks
+    }
+}
 
 const USAGE: &str = "usage: rustssi-bench --stack <kernel|speedy> --proto <udp|tcp> \
 --if <NAME> --local-ip <IPV4> --peer-ip <IPV4> --port <N> --peer-mac <MAC> --cpu <N> \
@@ -232,12 +258,18 @@ fn main() -> Result<()> {
 
     let mut buf = vec![0u8; 65536];
 
+    // Started here, not in main: dhat reports only what happens while the
+    // profiler is alive, so the window is the consume loop rather than the
+    // UMEM, the smoltcp buffers and the skeleton.
+    #[cfg(feature = "dhat")]
+    let dhat = dhat::Profiler::new_heap();
+
     let start = Instant::now();
     let cpu0 = cpu_secs();
     // Setup allocates plenty (UMEM, smoltcp buffers, the skeleton, this
     // buffer); only what the consume loop itself allocates is interesting, and
     // that should be nothing at all.
-    let allocs0 = ALLOCS.load(Ordering::Relaxed);
+    let allocs0 = allocs_now();
     let mut last = start;
     let mut msgs = 0u64;
     let mut bytes = 0u64;
@@ -280,6 +312,12 @@ fn main() -> Result<()> {
             }
         }
     }
+    // Read before the drop: dhat's stats are only available while its profiler
+    // is alive, and dropping it is what writes dhat-heap.json.
+    let allocs = allocs_now() - allocs0;
+    #[cfg(feature = "dhat")]
+    drop(dhat);
+
     // The loop exits either on the target count or on the idle cutoff. `last`
     // is only sampled every 64 messages, so use it for the idle exit and the
     // clock for the complete one, or elapsed is short by up to 63 receives —
@@ -307,8 +345,6 @@ fn main() -> Result<()> {
     } else {
         0.0
     };
-
-    let allocs = ALLOCS.load(Ordering::Relaxed) - allocs0;
 
     println!(
         "{{\"stack\":\"{stack}\",\"proto\":\"{proto_name}\",\"count\":{count},\"size\":{size},\

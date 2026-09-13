@@ -57,8 +57,6 @@ pub mod skel {
 }
 use skel::*;
 
-// Everything the AF_XDP UAPI defines comes from libc; only the numbers this
-// stack chooses for itself live here.
 use libc::{
     sockaddr_xdp, xdp_desc, xdp_mmap_offsets, xdp_ring_offset, xdp_umem_reg, AF_XDP, SOL_XDP,
     XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING, XDP_RING_NEED_WAKEUP,
@@ -74,11 +72,7 @@ const FILL_SIZE: u32 = 2048;
 const RX_SIZE: u32 = 2048;
 const TX_SIZE: u32 = 2048;
 
-/// Ethernet header we prepend/strip ourselves. smoltcp runs at `Medium::Ip`
-/// and only defines this behind `medium-ethernet`, which would pull in a
-/// link layer we do not use.
 const ETH_HDR_LEN: usize = 14;
-/// What a UDP datagram costs on the wire beyond its payload.
 const UDP_OVERHEAD: usize = IPV4_HEADER_LEN + UDP_HEADER_LEN;
 /// `XDP_UMEM_MIN_CHUNK_SIZE`: the kernel refuses a smaller UMEM chunk.
 const MIN_CHUNK_SIZE: usize = 2048;

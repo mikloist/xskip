@@ -17,6 +17,13 @@ smoltcp = { version = "0.12", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
 ] }
+dhat = { version = "0.3", optional = true }
+
+# Heap profile of the consume loop: who allocated, with stacks. Off by default
+# because it replaces the global allocator and costs real time.
+#   cargo build --release --features dhat
+[features]
+dhat = ["dep:dhat"]
 
 # Symbols in release: a stripped -O2 binary profiles as one opaque frame, and
 # reading the flamegraph is the point. Frame pointers come from RUSTFLAGS in
